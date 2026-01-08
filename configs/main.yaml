@@ -1,0 +1,12 @@
+timeframe: "TIME_FRAME_M1"
+days_back: 7
+mode: "paper"
+
+risk_limits:
+  max_position_per_symbol: 1
+  max_trades_per_day: 10
+  daily_loss_limit: 0
+
+live_launch:
+  demo_days: 7
+  max_real_position: 1
