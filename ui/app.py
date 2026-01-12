@@ -48,8 +48,82 @@ def _plot_candles(df: pd.DataFrame, title: str) -> go.Figure:
             )
         ]
     )
+    _add_pattern_labels(fig, df)
     fig.update_layout(title=title, xaxis_title="Time", yaxis_title="Price", height=520)
     return fig
+
+
+def _pattern_flags(df: pd.DataFrame) -> pd.DataFrame:
+    if df.empty:
+        return df
+    result = df.copy()
+    body = (result["close"] - result["open"]).abs()
+    rng = (result["high"] - result["low"]).replace(0, 1e-9)
+    upper = result["high"] - result[["open", "close"]].max(axis=1)
+    lower = result[["open", "close"]].min(axis=1) - result["low"]
+
+    pin_bar = ((upper >= 2 * body) & (lower <= 0.3 * body)) | (
+        (lower >= 2 * body) & (upper <= 0.3 * body)
+    )
+
+    prev_open = result["open"].shift(1)
+    prev_close = result["close"].shift(1)
+    prev_body = (prev_close - prev_open).abs()
+    engulfing = (body > prev_body) & (
+        (result["open"] <= prev_close) & (result["close"] >= prev_open)
+    ) | (
+        (result["open"] >= prev_close) & (result["close"] <= prev_open)
+    )
+
+    prev_high = result["high"].shift(1)
+    prev_low = result["low"].shift(1)
+    prev_dir = (prev_close - prev_open).fillna(0)
+    curr_dir = (result["close"] - result["open"]).fillna(0)
+    key_reversal = (
+        ((result["high"] > prev_high) & (curr_dir < 0) & (prev_dir > 0))
+        | ((result["low"] < prev_low) & (curr_dir > 0) & (prev_dir < 0))
+    )
+
+    result["pattern_pb"] = pin_bar.fillna(False)
+    result["pattern_e"] = engulfing.fillna(False)
+    result["pattern_kr"] = key_reversal.fillna(False)
+    return result
+
+
+def _add_pattern_labels(fig: go.Figure, df: pd.DataFrame) -> None:
+    flagged = _pattern_flags(df)
+    if flagged.empty:
+        return
+    labels = []
+    for _, row in flagged.iterrows():
+        parts = []
+        if row["pattern_pb"]:
+            parts.append("PB")
+        if row["pattern_e"]:
+            parts.append("E")
+        if row["pattern_kr"]:
+            parts.append("KR")
+        if parts:
+            labels.append((row["timestamp"], row["high"], " ".join(parts)))
+
+    if not labels:
+        return
+    label_df = pd.DataFrame(labels, columns=["timestamp", "high", "label"])
+    offset = (df["high"] - df["low"])
+    offset = offset.mask(offset == 0, df["high"] * 0.001)
+    offset_val = float(offset.median()) if not offset.empty else 0.0
+    label_df["y"] = label_df["high"] + offset_val * 0.2
+    fig.add_trace(
+        go.Scatter(
+            x=label_df["timestamp"],
+            y=label_df["y"],
+            text=label_df["label"],
+            mode="text",
+            textposition="top center",
+            name="Patterns",
+            showlegend=False,
+        )
+    )
 
 
 def _add_trade_markers(fig: go.Figure, trades: list, symbol: str) -> None:
