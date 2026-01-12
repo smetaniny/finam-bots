@@ -14,6 +14,8 @@ from core import get_logger
 from core.interfaces import Bar
 from ui.data_service import FinamDataService
 
+MOSCOW_TZ = "Europe/Moscow"
+
 
 def _bars_to_df(bars: List[Bar]) -> pd.DataFrame:
     df = pd.DataFrame(
@@ -30,7 +32,7 @@ def _bars_to_df(bars: List[Bar]) -> pd.DataFrame:
         ]
     )
     if not df.empty:
-        df["timestamp"] = pd.to_datetime(df["timestamp"])
+        df["timestamp"] = pd.to_datetime(df["timestamp"], utc=True)
     return df
 
 
@@ -104,53 +106,108 @@ def main() -> None:
         symbol = st.selectbox(
             "Инструмент (ticker@mic)",
             [
-                "SBER@MISX",
-                "GAZP@MISX",
-                "LKOH@MISX",
-                "VTBR@MISX",
-                "GMKN@MISX",
-                "ROSN@MISX",
-                "SNGS@MISX",
-                "ALRS@MISX",
-                "CHMF@MISX",
-                "NVTK@MISX",
+                "RMH6@RTSX",
             ],
             index=0,
         )
         timeframe = st.selectbox(
             "Таймфрейм",
             [
-                "TIME_FRAME_M1",
-                "TIME_FRAME_M5",
-                "TIME_FRAME_M15",
-                "TIME_FRAME_M30",
                 "TIME_FRAME_H1",
-                "TIME_FRAME_H2",
                 "TIME_FRAME_H4",
-                "TIME_FRAME_H8",
                 "TIME_FRAME_D",
-                "TIME_FRAME_W",
-                "TIME_FRAME_MN",
-                "TIME_FRAME_QR",
             ],
             index=0,
         )
-        days_back = st.slider("Глубина (дней)", 1, 30, 7)
+        ranges = {
+            "TIME_FRAME_D": 60,
+            "TIME_FRAME_H4": 30,
+            "TIME_FRAME_H1": 30,
+        }
+        days_back = ranges[timeframe]
+        st.caption("Глубина: D=60 дней, H4/H1=30 дней")
         trades_limit = st.slider("Сделки (лимит)", 10, 200, 50)
         st.subheader("Стоп/тейк (визуально)")
         stop_loss_pct = st.number_input("Stop Loss %", min_value=0.0, max_value=50.0, value=0.0, step=0.1)
         take_profit_pct = st.number_input("Take Profit %", min_value=0.0, max_value=200.0, value=0.0, step=0.1)
+        if st.button("Проверить MarketData"):
+            for check_symbol in ("SBER@MISX", "RMH6@RTSX"):
+                try:
+                    quote = client.get_last_quote(check_symbol)
+                    log.info("Last quote check (%s): %s", check_symbol, quote)
+                    st.success(f"{check_symbol}: OK")
+                except Exception as exc:
+                    log.warning("Last quote check (%s) failed: %s", check_symbol, exc)
+                    st.error(f"{check_symbol}: ошибка lastquote")
 
     try:
         with open("configs/main.yaml", "r", encoding="utf-8") as handle:
             main_cfg = yaml.safe_load(handle) or {}
 
+        try:
+            log.info("Clock (server): %s", client.get_clock())
+        except Exception:
+            log.info("Clock (server): n/a")
+        try:
+            log.info("Last quote: %s", client.get_last_quote(symbol))
+        except Exception:
+            log.info("Last quote: n/a")
         bars = service.get_bars(symbol, timeframe, days_back)
         df = _bars_to_df(bars)
         if df.empty:
             st.warning("Нет данных по свечам")
         else:
             fig = _plot_candles(df, f"{symbol} {timeframe}")
+
+        st.subheader("Свечи (O H L C V)")
+        last_quote_value = None
+        try:
+            last_quote = client.get_last_quote(symbol)
+            last_quote_value = float(last_quote.get("quote", {}).get("last", {}).get("value"))
+        except Exception:
+            last_quote_value = None
+        for tf in ("TIME_FRAME_D", "TIME_FRAME_H4", "TIME_FRAME_H1"):
+            tf_bars = service.get_bars(symbol, tf, ranges[tf])
+            tf_df = _bars_to_df(tf_bars)
+            st.markdown(f"**{tf} (последние {ranges[tf]} дней)**")
+            if tf_df.empty:
+                st.info("Нет данных")
+                continue
+            tf_df = tf_df.copy()
+            tf_df["timestamp"] = tf_df["timestamp"].dt.tz_convert(MOSCOW_TZ)
+            shift = {
+                "TIME_FRAME_H1": pd.Timedelta(hours=1),
+                "TIME_FRAME_H4": pd.Timedelta(hours=4),
+                "TIME_FRAME_D": pd.Timedelta(days=1),
+            }[tf]
+            tf_df["timestamp"] = tf_df["timestamp"] + shift
+            if tf == "TIME_FRAME_H1" and last_quote_value is not None:
+                current_hour = pd.Timestamp.now(tz=MOSCOW_TZ).floor("H")
+                last_ts = tf_df["timestamp"].iloc[-1]
+                if last_ts < current_hour:
+                    tf_df = pd.concat(
+                        [
+                            tf_df,
+                            pd.DataFrame(
+                                [
+                                    {
+                                        "timestamp": current_hour + shift,
+                                        "open": last_quote_value,
+                                        "high": last_quote_value,
+                                        "low": last_quote_value,
+                                        "close": last_quote_value,
+                                        "volume": 0.0,
+                                    }
+                                ]
+                            ),
+                        ],
+                        ignore_index=True,
+                    )
+            ohlcv = tf_df[["timestamp", "open", "high", "low", "close", "volume"]].copy()
+            ohlcv = ohlcv.rename(
+                columns={"open": "O", "high": "H", "low": "L", "close": "C", "volume": "V"}
+            )
+            st.dataframe(ohlcv, use_container_width=True)
 
         col1, col2 = st.columns(2)
         with col1:
@@ -171,11 +228,15 @@ def main() -> None:
 
         with col2:
             st.subheader("Сделки")
-            trades = service.get_trades(account_id, limit=trades_limit).get("trades", [])
-            if trades:
-                st.dataframe(pd.DataFrame(trades))
-            else:
-                st.info("Сделок нет")
+            try:
+                trades = service.get_trades(account_id, limit=trades_limit).get("trades", [])
+                if trades:
+                    st.dataframe(pd.DataFrame(trades))
+                else:
+                    st.info("Сделок нет")
+            except Exception as exc:
+                trades = []
+                st.error(f"Ошибка загрузки сделок: {exc}")
 
         if not df.empty:
             pos_match = next((p for p in positions if p.get("symbol") == symbol), None)
