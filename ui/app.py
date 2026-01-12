@@ -36,6 +36,19 @@ def _bars_to_df(bars: List[Bar]) -> pd.DataFrame:
     return df
 
 
+def _apply_time_shift(df: pd.DataFrame, timeframe: str) -> pd.DataFrame:
+    if df.empty:
+        return df
+    shift = {
+        "TIME_FRAME_H4": pd.Timedelta(hours=1),
+    }.get(timeframe)
+    result = df.copy()
+    result["timestamp"] = result["timestamp"].dt.tz_convert(MOSCOW_TZ)
+    if shift is not None:
+        result["timestamp"] = result["timestamp"] + shift
+    return result
+
+
 def _plot_candles(df: pd.DataFrame, title: str) -> go.Figure:
     fig = go.Figure(
         data=[
@@ -45,11 +58,48 @@ def _plot_candles(df: pd.DataFrame, title: str) -> go.Figure:
                 high=df["high"],
                 low=df["low"],
                 close=df["close"],
+                increasing_line_color="#22c55e",
+                increasing_fillcolor="#22c55e",
+                decreasing_line_color="#ef4444",
+                decreasing_fillcolor="#ef4444",
             )
         ]
     )
     _add_pattern_labels(fig, df)
-    fig.update_layout(title=title, xaxis_title="Time", yaxis_title="Price", height=520)
+    fig.update_layout(
+        title=title,
+        height=560,
+        margin=dict(l=40, r=20, t=40, b=40),
+        plot_bgcolor="#0b0f14",
+        paper_bgcolor="#0b0f14",
+        font=dict(color="#e5e7eb", size=12),
+        xaxis=dict(
+            title="",
+            showgrid=True,
+            gridcolor="#1f2937",
+            type="category",
+            categoryorder="array",
+            categoryarray=df["timestamp"].tolist(),
+            rangeslider=dict(visible=False),
+            showspikes=True,
+            spikemode="across",
+            spikecolor="#374151",
+            spikethickness=1,
+            spikesnap="cursor",
+        ),
+        yaxis=dict(
+            title="",
+            showgrid=True,
+            gridcolor="#1f2937",
+            showspikes=True,
+            spikemode="across",
+            spikecolor="#374151",
+            spikethickness=1,
+            spikesnap="cursor",
+            fixedrange=False,
+        ),
+        dragmode="pan",
+    )
     return fig
 
 
@@ -94,21 +144,30 @@ def _add_pattern_labels(fig: go.Figure, df: pd.DataFrame) -> None:
     flagged = _pattern_flags(df)
     if flagged.empty:
         return
+    descriptions = {
+        "PB": "Пин‑бар — свеча с длинным хвостом (тенью) и маленьким телом у одного края, сигнал возможного разворота.",
+        "E": "Поглощение (Engulfing) — свеча, тело которой полностью перекрывает тело предыдущей в противоположную сторону.",
+        "KR": "Key Reversal — разворотный бар: делает новый экстремум против тренда и закрывается в противоположной стороне (часто с большим объемом).",
+    }
     labels = []
     for _, row in flagged.iterrows():
         parts = []
+        hover_parts = []
         if row["pattern_pb"]:
             parts.append("PB")
+            hover_parts.append(descriptions["PB"])
         if row["pattern_e"]:
             parts.append("E")
+            hover_parts.append(descriptions["E"])
         if row["pattern_kr"]:
             parts.append("KR")
+            hover_parts.append(descriptions["KR"])
         if parts:
-            labels.append((row["timestamp"], row["high"], " ".join(parts)))
+            labels.append((row["timestamp"], row["high"], "<br>".join(parts), "<br>".join(hover_parts)))
 
     if not labels:
         return
-    label_df = pd.DataFrame(labels, columns=["timestamp", "high", "label"])
+    label_df = pd.DataFrame(labels, columns=["timestamp", "high", "label", "hover"])
     offset = (df["high"] - df["low"])
     offset = offset.mask(offset == 0, df["high"] * 0.001)
     offset_val = float(offset.median()) if not offset.empty else 0.0
@@ -118,9 +177,11 @@ def _add_pattern_labels(fig: go.Figure, df: pd.DataFrame) -> None:
             x=label_df["timestamp"],
             y=label_df["y"],
             text=label_df["label"],
+            hovertext=label_df["hover"],
             mode="text",
             textposition="top center",
             name="Patterns",
+            hovertemplate="%{hovertext}<extra></extra>",
             showlegend=False,
         )
     )
@@ -139,7 +200,7 @@ def _add_trade_markers(fig: go.Figure, trades: list, symbol: str) -> None:
     if not points:
         return
     df = pd.DataFrame(points, columns=["timestamp", "price", "side"])
-    df["timestamp"] = pd.to_datetime(df["timestamp"])
+    df["timestamp"] = pd.to_datetime(df["timestamp"], utc=True).dt.tz_convert(MOSCOW_TZ)
     colors = df["side"].map({"SIDE_BUY": "green", "SIDE_SELL": "red"}).fillna("blue")
     fig.add_trace(
         go.Scatter(
@@ -226,62 +287,68 @@ def main() -> None:
             log.info("Last quote: %s", client.get_last_quote(symbol))
         except Exception:
             log.info("Last quote: n/a")
-        bars = service.get_bars(symbol, timeframe, days_back)
-        df = _bars_to_df(bars)
-        if df.empty:
-            st.warning("Нет данных по свечам")
-        else:
-            fig = _plot_candles(df, f"{symbol} {timeframe}")
+        tabs = st.tabs(["График", "Свечи (O H L C V)"])
+        with tabs[0]:
+            bars = service.get_bars(symbol, timeframe, days_back)
+            df = _bars_to_df(bars)
+            if df.empty:
+                st.warning("Нет данных по свечам")
+            else:
+                df_plot = _apply_time_shift(df, timeframe)
+                fig = _plot_candles(df_plot, f"{symbol} {timeframe}")
+                st.plotly_chart(fig, use_container_width=True)
 
-        st.subheader("Свечи (O H L C V)")
-        last_quote_value = None
-        try:
-            last_quote = client.get_last_quote(symbol)
-            last_quote_value = float(last_quote.get("quote", {}).get("last", {}).get("value"))
-        except Exception:
+        with tabs[1]:
+            st.subheader("Свечи (O H L C V)")
             last_quote_value = None
-        for tf in ("TIME_FRAME_D", "TIME_FRAME_H4", "TIME_FRAME_H1"):
-            tf_bars = service.get_bars(symbol, tf, ranges[tf])
-            tf_df = _bars_to_df(tf_bars)
-            st.markdown(f"**{tf} (последние {ranges[tf]} дней)**")
-            if tf_df.empty:
-                st.info("Нет данных")
-                continue
-            tf_df = tf_df.copy()
-            tf_df["timestamp"] = tf_df["timestamp"].dt.tz_convert(MOSCOW_TZ)
-            shift = {
-                "TIME_FRAME_H1": pd.Timedelta(hours=1),
-                "TIME_FRAME_H4": pd.Timedelta(hours=4),
-                "TIME_FRAME_D": pd.Timedelta(days=1),
-            }[tf]
-            tf_df["timestamp"] = tf_df["timestamp"] + shift
-            if tf == "TIME_FRAME_H1" and last_quote_value is not None:
-                current_hour = pd.Timestamp.now(tz=MOSCOW_TZ).floor("H")
-                last_ts = tf_df["timestamp"].iloc[-1]
-                if last_ts < current_hour:
-                    tf_df = pd.concat(
-                        [
-                            tf_df,
-                            pd.DataFrame(
+            try:
+                last_quote = client.get_last_quote(symbol)
+                last_quote_value = float(last_quote.get("quote", {}).get("last", {}).get("value"))
+            except Exception:
+                last_quote_value = None
+            for tf in ("TIME_FRAME_D", "TIME_FRAME_H4", "TIME_FRAME_H1"):
+                tf_bars = service.get_bars(symbol, tf, ranges[tf])
+                tf_df = _bars_to_df(tf_bars)
+                st.markdown(f"**{tf} (последние {ranges[tf]} дней)**")
+                if tf_df.empty:
+                    st.info("Нет данных")
+                    continue
+                tf_df = _apply_time_shift(tf_df, tf)
+                if last_quote_value is not None:
+                    now_msk = pd.Timestamp.now(tz=MOSCOW_TZ)
+                    if tf == "TIME_FRAME_H1":
+                        current_mark = now_msk.floor("H")
+                    elif tf == "TIME_FRAME_H4":
+                        current_mark = now_msk.floor("4H") + pd.Timedelta(hours=1)
+                    elif tf == "TIME_FRAME_D":
+                        current_mark = now_msk.normalize()
+                    else:
+                        current_mark = None
+                    if current_mark is not None:
+                        if current_mark not in set(tf_df["timestamp"]):
+                            tf_df = pd.concat(
                                 [
-                                    {
-                                        "timestamp": current_hour + shift,
-                                        "open": last_quote_value,
-                                        "high": last_quote_value,
-                                        "low": last_quote_value,
-                                        "close": last_quote_value,
-                                        "volume": 0.0,
-                                    }
-                                ]
-                            ),
-                        ],
-                        ignore_index=True,
-                    )
-            ohlcv = tf_df[["timestamp", "open", "high", "low", "close", "volume"]].copy()
-            ohlcv = ohlcv.rename(
-                columns={"open": "O", "high": "H", "low": "L", "close": "C", "volume": "V"}
-            )
-            st.dataframe(ohlcv, use_container_width=True)
+                                    tf_df,
+                                    pd.DataFrame(
+                                        [
+                                            {
+                                                "timestamp": current_mark,
+                                                "open": last_quote_value,
+                                                "high": last_quote_value,
+                                                "low": last_quote_value,
+                                                "close": last_quote_value,
+                                                "volume": 0.0,
+                                            }
+                                        ]
+                                    ),
+                                ],
+                                ignore_index=True,
+                            )
+                ohlcv = tf_df[["timestamp", "open", "high", "low", "close", "volume"]].copy()
+                ohlcv = ohlcv.rename(
+                    columns={"open": "O", "high": "H", "low": "L", "close": "C", "volume": "V"}
+                )
+                st.dataframe(ohlcv, use_container_width=True)
 
         col1, col2 = st.columns(2)
         with col1:
@@ -312,7 +379,7 @@ def main() -> None:
                 trades = []
                 st.error(f"Ошибка загрузки сделок: {exc}")
 
-        if not df.empty:
+        if "df" in locals() and not df.empty:
             pos_match = next((p for p in positions if p.get("symbol") == symbol), None)
             if pos_match and (stop_loss_pct > 0 or take_profit_pct > 0):
                 qty = float(pos_match.get("quantity", {}).get("value", 0) or 0)
@@ -330,7 +397,6 @@ def main() -> None:
                             fig.add_hline(y=base_price * (1 - take_profit_pct / 100), line_dash="dot", line_color="green")
 
             _add_trade_markers(fig, trades, symbol)
-            st.plotly_chart(fig, use_container_width=True)
 
         st.subheader("Ордера")
         orders = service.get_orders(account_id).get("orders", [])
