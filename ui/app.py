@@ -131,14 +131,19 @@ def _important_extremes(df: pd.DataFrame, window: int, distance: float) -> tuple
     is_low = np.zeros(n, dtype=bool)
     is_high = np.zeros(n, dtype=bool)
     
-    # Минимальное движение для подтверждения
-    min_move = max(5.0, distance * 0.05)  # хотя бы 5 пунктов или 5% от distance
+    # Для RTS на H4 оптимальные параметры
+    min_move = 5.0  # минимальное движение для подтверждения
+    min_candle_body = 0.15  # минимум 15% тела свечи
     
     for i in range(n):
         # ========== ПРОВЕРКА ВАЖНОГО МИНИМУМА ==========
         # Проверяем, что это локальный минимум
-        if i > 0 and i < n - 1 and low[i] < low[i-1] and low[i] < low[i+1]:
-            # 1. Проверка падения слева (хотя бы 1 свеча из window выше)
+        is_local_min = False
+        if i > 0 and i < n - 1:
+            is_local_min = low[i] < low[i-1] and low[i] < low[i+1]
+        
+        if is_local_min:
+            # 1. Проверка падения слева
             left_ok = False
             look_left = min(window, i)
             for j in range(1, look_left + 1):
@@ -146,22 +151,27 @@ def _important_extremes(df: pd.DataFrame, window: int, distance: float) -> tuple
                     left_ok = True
                     break
             
-            # 2. Проверка роста справа (хотя бы 1 свеча из window/2 выше на distance)
+            # 2. Проверка роста справа
             right_ok = False
             look_right = min(window // 2, n - i - 1)
             for j in range(1, look_right + 1):
-                if low[i+j] > low[i] + distance:
+                if low[i+j] > low[i] + distance * 0.5:  # Уменьшили требование с distance до distance*0.5
                     right_ok = True
                     break
             
             # 3. Проверка закрытия (не на самом минимуме)
             candle_range = high[i] - low[i]
-            close_ok = candle_range > 0 and (close[i] - low[i]) > (candle_range * 0.15)
+            if candle_range > 0:
+                body_ratio = (close[i] - low[i]) / candle_range
+                close_ok = body_ratio > min_candle_body
+            else:
+                close_ok = False
             
-            # 4. Проверка на ложный пробой (цена не падала сильно ниже)
+            # 4. Проверка на ложный пробой (мягче)
             false_break = False
-            for j in range(1, min(window, n - i - 1) + 1):
-                if low[i+j] < low[i] - (distance * 0.4):
+            check_forward = min(window, n - i - 1)
+            for j in range(1, check_forward + 1):
+                if low[i+j] < low[i] - (distance * 0.6):  # Увеличили допуск
                     false_break = True
                     break
             
@@ -169,8 +179,12 @@ def _important_extremes(df: pd.DataFrame, window: int, distance: float) -> tuple
         
         # ========== ПРОВЕРКА ВАЖНОГО МАКСИМУМА ==========
         # Проверяем, что это локальный максимум
-        if i > 0 and i < n - 1 and high[i] > high[i-1] and high[i] > high[i+1]:
-            # 1. Проверка роста слева (хотя бы 1 свеча из window ниже)
+        is_local_max = False
+        if i > 0 and i < n - 1:
+            is_local_max = high[i] > high[i-1] and high[i] > high[i+1]
+        
+        if is_local_max:
+            # 1. Проверка роста слева
             left_ok = False
             look_left = min(window, i)
             for j in range(1, look_left + 1):
@@ -178,28 +192,102 @@ def _important_extremes(df: pd.DataFrame, window: int, distance: float) -> tuple
                     left_ok = True
                     break
             
-            # 2. Проверка падения справа (хотя бы 1 свеча из window/2 ниже на distance)
+            # 2. Проверка падения справа
             right_ok = False
             look_right = min(window // 2, n - i - 1)
             for j in range(1, look_right + 1):
-                if high[i+j] < high[i] - distance:
+                if high[i+j] < high[i] - distance * 0.5:  # Уменьшили требование
                     right_ok = True
                     break
             
             # 3. Проверка закрытия (не на самом максимуме)
             candle_range = high[i] - low[i]
-            close_ok = candle_range > 0 and (high[i] - close[i]) > (candle_range * 0.15)
+            if candle_range > 0:
+                body_ratio = (high[i] - close[i]) / candle_range
+                close_ok = body_ratio > min_candle_body
+            else:
+                close_ok = False
             
-            # 4. Проверка на ложный пробой (цена не поднималась сильно выше)
+            # 4. Проверка на ложный пробой (мягче)
             false_break = False
-            for j in range(1, min(window, n - i - 1) + 1):
-                if high[i+j] > high[i] + (distance * 0.4):
+            check_forward = min(window, n - i - 1)
+            for j in range(1, check_forward + 1):
+                if high[i+j] > high[i] + (distance * 0.6):  # Увеличили допуск
                     false_break = True
                     break
             
             is_high[i] = left_ok and right_ok and close_ok and not false_break
     
-    return pd.Series(is_low, index=df.index), pd.Series(is_high, index=df.index)
+    # Базовая фильтрация близких экстремумов
+    return _filter_close_extremes(
+        pd.Series(is_low, index=df.index),
+        pd.Series(is_high, index=df.index),
+        df,
+        min_gap=max(30.0, distance * 0.2)  # Уменьшили минимальный gap
+    )
+
+
+def _filter_close_extremes(
+    is_low: pd.Series,
+    is_high: pd.Series,
+    df: pd.DataFrame,
+    min_gap: float = 30.0,
+) -> tuple[pd.Series, pd.Series]:
+    """Фильтрует слишком близкие экстремумы."""
+    filtered_low = is_low.copy()
+    filtered_high = is_high.copy()
+    
+    # Фильтрация минимумов
+    low_indices = df[filtered_low].index.tolist()
+    if len(low_indices) > 1:
+        low_values = df.loc[low_indices, 'low']
+        sorted_indices = low_values.sort_values().index.tolist()
+        
+        i = 0
+        while i < len(sorted_indices):
+            current_idx = sorted_indices[i]
+            current_val = df.at[current_idx, 'low']
+            
+            # Удаляем слишком близкие следующие минимумы
+            j = i + 1
+            while j < len(sorted_indices):
+                next_idx = sorted_indices[j]
+                next_val = df.at[next_idx, 'low']
+                
+                if abs(next_val - current_val) < min_gap:
+                    # Оставляем более ранний минимум
+                    filtered_low.at[next_idx] = False
+                    sorted_indices.pop(j)
+                else:
+                    j += 1
+            i += 1
+    
+    # Фильтрация максимумов
+    high_indices = df[filtered_high].index.tolist()
+    if len(high_indices) > 1:
+        high_values = df.loc[high_indices, 'high']
+        sorted_indices = high_values.sort_values(ascending=False).index.tolist()
+        
+        i = 0
+        while i < len(sorted_indices):
+            current_idx = sorted_indices[i]
+            current_val = df.at[current_idx, 'high']
+            
+            # Удаляем слишком близкие следующие максимумы
+            j = i + 1
+            while j < len(sorted_indices):
+                next_idx = sorted_indices[j]
+                next_val = df.at[next_idx, 'high']
+                
+                if abs(next_val - current_val) < min_gap:
+                    # Оставляем более ранний максимум
+                    filtered_high.at[next_idx] = False
+                    sorted_indices.pop(j)
+                else:
+                    j += 1
+            i += 1
+    
+    return filtered_low, filtered_high
 
 
 def _add_zones_from_extremes(fig: go.Figure, df: pd.DataFrame, is_low: pd.Series, is_high: pd.Series) -> None:
@@ -211,14 +299,20 @@ def _add_zones_from_extremes(fig: go.Figure, df: pd.DataFrame, is_low: pd.Series
     support_points = df[is_low]
     if not support_points.empty:
         for _, row in support_points.iterrows():
-            if row['close'] > row['low']:  # Закрытие должно быть выше минимума
+            zone_low = row['low']
+            zone_high = row['close']
+            # Если закрытие на минимуме или ниже, немного расширяем зону
+            if zone_high <= zone_low:
+                zone_high = zone_low + (df['high'].max() - df['low'].min()) * 0.001
+            
+            if zone_high > zone_low:
                 fig.add_hrect(
-                    y0=row['low'],
-                    y1=row['close'],
+                    y0=zone_low,
+                    y1=zone_high,
                     fillcolor="rgba(34, 197, 94, 0.15)",
                     line_width=1,
                     line_color="rgba(34, 197, 94, 0.5)",
-                    annotation_text=f"S: {row['low']:.1f}-{row['close']:.1f}",
+                    annotation_text=f"S: {zone_low:.1f}-{zone_high:.1f}",
                     annotation_position="top left",
                     annotation_font_size=10,
                     annotation_font_color="#22c55e"
@@ -228,14 +322,20 @@ def _add_zones_from_extremes(fig: go.Figure, df: pd.DataFrame, is_low: pd.Series
     resistance_points = df[is_high]
     if not resistance_points.empty:
         for _, row in resistance_points.iterrows():
-            if row['high'] > row['close']:  # Максимум должен быть выше закрытия
+            zone_low = row['close']
+            zone_high = row['high']
+            # Если закрытие на максимуме или выше, немного расширяем зону
+            if zone_low >= zone_high:
+                zone_low = zone_high - (df['high'].max() - df['low'].min()) * 0.001
+            
+            if zone_high > zone_low:
                 fig.add_hrect(
-                    y0=row['close'],
-                    y1=row['high'],
+                    y0=zone_low,
+                    y1=zone_high,
                     fillcolor="rgba(239, 68, 68, 0.15)",
                     line_width=1,
                     line_color="rgba(239, 68, 68, 0.5)",
-                    annotation_text=f"R: {row['close']:.1f}-{row['high']:.1f}",
+                    annotation_text=f"R: {zone_low:.1f}-{zone_high:.1f}",
                     annotation_position="bottom left",
                     annotation_font_size=10,
                     annotation_font_color="#ef4444"
@@ -289,8 +389,8 @@ def _plot_candles(
     df: pd.DataFrame,
     title: str,
     markers_df: pd.DataFrame | None = None,
-    important_window: int = 10,
-    important_distance: float = 150.0,
+    important_window: int = 15,  # Увеличил для H4
+    important_distance: float = 100.0,  # Уменьшил для H4
 ) -> go.Figure:
     fig = go.Figure(
         data=[
@@ -541,18 +641,33 @@ def main() -> None:
                 f"множитель {multiplier:g})"
             )
         
+        # РЕКОМЕНДОВАННЫЕ НАСТРОЙКИ ДЛЯ RTS H4:
+        if timeframe == "TIME_FRAME_H4":
+            default_distance = 100.0
+            default_window = 15
+            st.info("Для H4 рекомендую: D=100, окно=15")
+        elif timeframe == "TIME_FRAME_H1":
+            default_distance = 50.0
+            default_window = 20
+            st.info("Для H1 рекомендую: D=50, окно=20")
+        else:  # D1
+            default_distance = 200.0
+            default_window = 20
+            st.info("Для D1 рекомендую: D=200, окно=20")
+        
         important_distance_manual = st.number_input(
-            "Порог расстояния D (вручную)",
+            "Порог расстояния D",
             min_value=0.0,
-            value=float(auto_distance or 150.0),
-            step=1.0,
+            value=float(auto_distance or default_distance),
+            step=5.0,
+            help="Минимальное движение после экстремума. RTS H4: 80-120 пунктов"
         )
         
         important_window = st.number_input(
             "Окно анализа (свечей)",
             min_value=2,
             max_value=50,
-            value=10,
+            value=default_window,
             step=1,
             help="Сколько свечей анализировать слева и справа от экстремума"
         )
@@ -618,10 +733,15 @@ def main() -> None:
                 # Находим важные экстремумы
                 is_low, is_high = _important_extremes(df_plot_base, important_window, important_distance)
                 
-                st.caption(f"Важные экстремумы: минимумов={int(is_low.sum())}, максимумов={int(is_high.sum())}")
+                found_lows = int(is_low.sum())
+                found_highs = int(is_high.sum())
+                st.caption(f"Важные экстремумы: минимумов={found_lows}, максимумов={found_highs}")
                 
-                if int(is_low.sum()) + int(is_high.sum()) == 0:
-                    st.info("По текущим параметрам не найдено важных экстремумов. Попробуйте уменьшить расстояние D или увеличить окно.")
+                if found_lows + found_highs == 0:
+                    st.warning("Не найдено важных экстремумов. Возможные причины:")
+                    st.write("1. Параметр D слишком большой - уменьшите до 50-100 для H4")
+                    st.write("2. Окно слишком маленькое - увеличьте до 10-20")
+                    st.write("3. На графике действительно нет четких разворотов")
                 else:
                     with st.expander("Список важных экстремумов"):
                         points = []
@@ -733,6 +853,7 @@ def main() -> None:
             st.info("Активных ордеров нет")
 
         st.subheader("Логи")
+
         log_path = os.getenv("FINAM_LOG_FILE", "logs/finam-bots.log")
         log_text = _tail_log(log_path)
         if log_text:
