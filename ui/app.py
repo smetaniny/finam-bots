@@ -118,150 +118,167 @@ def _auto_distance_for_timeframe(point_value: float, timeframe: str) -> float:
     return point_value * FIGURE_POINTS * multiplier
 
 
-def _important_extremes(
-    df: pd.DataFrame, window: int, distance: float
-) -> tuple[pd.Series, pd.Series]:
+def _important_extremes(df: pd.DataFrame, window: int, distance: float) -> tuple[pd.Series, pd.Series]:
+    """Находит важные минимумы и максимумы по методике Валеева."""
     if df.empty or window < 2:
         return pd.Series(dtype=bool, index=df.index), pd.Series(dtype=bool, index=df.index)
-
-    low = df["low"].values
-    high = df["high"].values
-    close = df["close"].values
-
+    
+    low = df['low'].values
+    high = df['high'].values
+    close = df['close'].values
+    
     n = len(df)
     is_low = np.zeros(n, dtype=bool)
     is_high = np.zeros(n, dtype=bool)
-
-    min_candle_size = distance * 0.03
-
+    
+    # Минимальное движение для подтверждения
+    min_move = max(5.0, distance * 0.05)  # хотя бы 5 пунктов или 5% от distance
+    
     for i in range(n):
-        if i > 0 and i < n - 1 and low[i] < low[i - 1] and low[i] < low[i + 1]:
+        # ========== ПРОВЕРКА ВАЖНОГО МИНИМУМА ==========
+        # Проверяем, что это локальный минимум
+        if i > 0 and i < n - 1 and low[i] < low[i-1] and low[i] < low[i+1]:
+            # 1. Проверка падения слева (хотя бы 1 свеча из window выше)
             left_ok = False
-            for j in range(1, min(window, i) + 1):
-                if low[i] < low[i - j] - min_candle_size:
+            look_left = min(window, i)
+            for j in range(1, look_left + 1):
+                if low[i] < low[i-j] - min_move:
                     left_ok = True
                     break
-
+            
+            # 2. Проверка роста справа (хотя бы 1 свеча из window/2 выше на distance)
             right_ok = False
             look_right = min(window // 2, n - i - 1)
             for j in range(1, look_right + 1):
-                if low[i + j] > low[i] + distance:
+                if low[i+j] > low[i] + distance:
                     right_ok = True
                     break
-
-            candle_size = high[i] - low[i]
-            close_ok = candle_size > min_candle_size and (close[i] - low[i]) > (candle_size * 0.15)
-
+            
+            # 3. Проверка закрытия (не на самом минимуме)
+            candle_range = high[i] - low[i]
+            close_ok = candle_range > 0 and (close[i] - low[i]) > (candle_range * 0.15)
+            
+            # 4. Проверка на ложный пробой (цена не падала сильно ниже)
             false_break = False
-            look_forward = min(window, n - i - 1)
-            for j in range(1, look_forward + 1):
-                if low[i + j] < low[i] - (distance * 0.3):
+            for j in range(1, min(window, n - i - 1) + 1):
+                if low[i+j] < low[i] - (distance * 0.4):
                     false_break = True
                     break
-
+            
             is_low[i] = left_ok and right_ok and close_ok and not false_break
-
-        if i > 0 and i < n - 1 and high[i] > high[i - 1] and high[i] > high[i + 1]:
+        
+        # ========== ПРОВЕРКА ВАЖНОГО МАКСИМУМА ==========
+        # Проверяем, что это локальный максимум
+        if i > 0 and i < n - 1 and high[i] > high[i-1] and high[i] > high[i+1]:
+            # 1. Проверка роста слева (хотя бы 1 свеча из window ниже)
             left_ok = False
-            for j in range(1, min(window, i) + 1):
-                if high[i] > high[i - j] + min_candle_size:
+            look_left = min(window, i)
+            for j in range(1, look_left + 1):
+                if high[i] > high[i-j] + min_move:
                     left_ok = True
                     break
-
+            
+            # 2. Проверка падения справа (хотя бы 1 свеча из window/2 ниже на distance)
             right_ok = False
             look_right = min(window // 2, n - i - 1)
             for j in range(1, look_right + 1):
-                if high[i + j] < high[i] - distance:
+                if high[i+j] < high[i] - distance:
                     right_ok = True
                     break
-
-            candle_size = high[i] - low[i]
-            close_ok = candle_size > min_candle_size and (high[i] - close[i]) > (candle_size * 0.15)
-
+            
+            # 3. Проверка закрытия (не на самом максимуме)
+            candle_range = high[i] - low[i]
+            close_ok = candle_range > 0 and (high[i] - close[i]) > (candle_range * 0.15)
+            
+            # 4. Проверка на ложный пробой (цена не поднималась сильно выше)
             false_break = False
-            look_forward = min(window, n - i - 1)
-            for j in range(1, look_forward + 1):
-                if high[i + j] > high[i] + (distance * 0.3):
+            for j in range(1, min(window, n - i - 1) + 1):
+                if high[i+j] > high[i] + (distance * 0.4):
                     false_break = True
                     break
-
+            
             is_high[i] = left_ok and right_ok and close_ok and not false_break
-
+    
     return pd.Series(is_low, index=df.index), pd.Series(is_high, index=df.index)
 
 
-def _add_zones_from_extremes(
-    fig: go.Figure, df: pd.DataFrame, is_low: pd.Series, is_high: pd.Series
-) -> None:
+def _add_zones_from_extremes(fig: go.Figure, df: pd.DataFrame, is_low: pd.Series, is_high: pd.Series) -> None:
+    """Добавляет зоны поддержки/сопротивления на график."""
     if df.empty:
         return
-
+    
+    # ЗОНЫ ПОДДЕРЖКИ (от важных минимумов)
     support_points = df[is_low]
     if not support_points.empty:
         for _, row in support_points.iterrows():
-            if row["close"] > row["low"]:
+            if row['close'] > row['low']:  # Закрытие должно быть выше минимума
                 fig.add_hrect(
-                    y0=row["low"],
-                    y1=row["close"],
+                    y0=row['low'],
+                    y1=row['close'],
                     fillcolor="rgba(34, 197, 94, 0.15)",
                     line_width=1,
-                    line_color="rgba(34, 197, 94, 0.7)",
+                    line_color="rgba(34, 197, 94, 0.5)",
                     annotation_text=f"S: {row['low']:.1f}-{row['close']:.1f}",
                     annotation_position="top left",
                     annotation_font_size=10,
-                    annotation_font_color="#22c55e",
+                    annotation_font_color="#22c55e"
                 )
-
+    
+    # ЗОНЫ СОПРОТИВЛЕНИЯ (от важных максимумов)
     resistance_points = df[is_high]
     if not resistance_points.empty:
         for _, row in resistance_points.iterrows():
-            if row["high"] > row["close"]:
+            if row['high'] > row['close']:  # Максимум должен быть выше закрытия
                 fig.add_hrect(
-                    y0=row["close"],
-                    y1=row["high"],
+                    y0=row['close'],
+                    y1=row['high'],
                     fillcolor="rgba(239, 68, 68, 0.15)",
                     line_width=1,
-                    line_color="rgba(239, 68, 68, 0.7)",
+                    line_color="rgba(239, 68, 68, 0.5)",
                     annotation_text=f"R: {row['close']:.1f}-{row['high']:.1f}",
                     annotation_position="bottom left",
                     annotation_font_size=10,
-                    annotation_font_color="#ef4444",
+                    annotation_font_color="#ef4444"
                 )
 
 
-def _add_important_extremes_markers(
-    fig: go.Figure, df: pd.DataFrame, is_low: pd.Series, is_high: pd.Series
-) -> None:
+def _add_important_extremes_markers(fig: go.Figure, df: pd.DataFrame, is_low: pd.Series, is_high: pd.Series) -> None:
+    """Добавляет маркеры важных экстремумов на график."""
     if df.empty:
         return
-    rng = (df["high"] - df["low"])
-    offset = rng.median()
-    if not pd.notna(offset) or offset == 0:
-        offset = float(df["high"].iloc[-1]) * 0.003
-    else:
-        offset = float(offset) * 0.6
+    
     low_points = df[is_low]
     high_points = df[is_high]
+    
+    # Вычисляем отступ для маркеров
+    price_range = (df['high'].max() - df['low'].min())
+    offset = price_range * 0.02 if price_range > 0 else 10.0
+    
     if not low_points.empty:
         fig.add_trace(
             go.Scatter(
                 x=low_points["timestamp"],
                 y=low_points["low"] - offset,
-                mode="markers",
-                marker=dict(symbol="line-ew", size=40, color="#22c55e"),
-                name="Important L",
+                mode="markers+text",
+                marker=dict(symbol="triangle-up", size=12, color="#22c55e", line=dict(width=2, color="white")),
+                text=[f"{l:.1f}" for l in low_points["low"]],
+                textposition="top center",
+                name="Важные минимумы",
                 showlegend=False,
                 opacity=0.9,
             )
         )
+    
     if not high_points.empty:
         fig.add_trace(
             go.Scatter(
                 x=high_points["timestamp"],
                 y=high_points["high"] + offset,
-                mode="markers",
-                marker=dict(symbol="line-ew", size=40, color="#ef4444"),
-                name="Important H",
+                mode="markers+text",
+                marker=dict(symbol="triangle-down", size=12, color="#ef4444", line=dict(width=2, color="white")),
+                text=[f"{h:.1f}" for h in high_points["high"]],
+                textposition="bottom center",
+                name="Важные максимумы",
                 showlegend=False,
                 opacity=0.9,
             )
@@ -287,15 +304,25 @@ def _plot_candles(
                 increasing_fillcolor="#22c55e",
                 decreasing_line_color="#ef4444",
                 decreasing_fillcolor="#ef4444",
+                name="Цена",
             )
         ]
     )
+    
     _add_pattern_labels(fig, df)
+    
     if markers_df is None:
         markers_df = df
+    
+    # Находим важные экстремумы
     is_low, is_high = _important_extremes(markers_df, important_window, important_distance)
+    
+    # Добавляем зоны поддержки/сопротивления
     _add_zones_from_extremes(fig, markers_df, is_low, is_high)
+    
+    # Добавляем маркеры экстремумов
     _add_important_extremes_markers(fig, markers_df, is_low, is_high)
+    
     fig.update_layout(
         title=title,
         height=560,
@@ -329,7 +356,9 @@ def _plot_candles(
             fixedrange=False,
         ),
         dragmode="pan",
+        hovermode="x unified",
     )
+    
     return fig
 
 
@@ -498,37 +527,38 @@ def main() -> None:
             auto_distance = None
             auto_step = None
             auto_point = None
+        
         use_auto_distance = st.checkbox(
             "D из параметров инструмента",
             value=auto_distance is not None,
         )
+        
         if auto_distance is not None:
             multiplier = TIMEFRAME_FIGURE_MULTIPLIER.get(timeframe, 1.5)
             st.caption(
-                "Авто D = {distance:g} (1 фигура = {points} пунктов, пункт = {point:g}, "
-                "шаг цены = {step:g}, множитель {multiplier:g})".format(
-                    distance=auto_distance,
-                    points=FIGURE_POINTS,
-                    point=auto_point or 0,
-                    step=auto_step or 0,
-                    multiplier=multiplier,
-                )
+                f"Авто D = {auto_distance:g} (1 фигура = {FIGURE_POINTS} пунктов, "
+                f"пункт = {auto_point or 0:g}, шаг цены = {auto_step or 0:g}, "
+                f"множитель {multiplier:g})"
             )
-        important_window = st.slider(
-            "Окно анализа",
-            5,
-            20,
-            10,
-            help="Сколько свечей анализировать слева и справа от экстремума",
+        
+        important_distance_manual = st.number_input(
+            "Порог расстояния D (вручную)",
+            min_value=0.0,
+            value=float(auto_distance or 150.0),
+            step=1.0,
         )
-        important_distance_manual = st.slider(
-            "Минимальное движение",
-            50,
-            300,
-            150,
-            help="Минимальное движение цены после экстремума (пунктов)",
+        
+        important_window = st.number_input(
+            "Окно анализа (свечей)",
+            min_value=2,
+            max_value=50,
+            value=10,
+            step=1,
+            help="Сколько свечей анализировать слева и справа от экстремума"
         )
+        
         important_distance = auto_distance if use_auto_distance and auto_distance is not None else important_distance_manual
+        
         ranges = {
             "TIME_FRAME_D": 60,
             "TIME_FRAME_H4": 30,
@@ -536,10 +566,13 @@ def main() -> None:
         }
         days_back = ranges[timeframe]
         st.caption("Глубина: D=60 дней, H4/H1=30 дней")
+        
         trades_limit = st.slider("Сделки (лимит)", 10, 200, 50)
+        
         st.subheader("Стоп/тейк (визуально)")
         stop_loss_pct = st.number_input("Stop Loss %", min_value=0.0, max_value=50.0, value=0.0, step=0.1)
         take_profit_pct = st.number_input("Take Profit %", min_value=0.0, max_value=200.0, value=0.0, step=0.1)
+        
         if st.button("Проверить MarketData"):
             for check_symbol in ("SBER@MISX", "RMH6@RTSX"):
                 try:
@@ -558,10 +591,12 @@ def main() -> None:
             log.info("Clock (server): %s", client.get_clock())
         except Exception:
             log.info("Clock (server): n/a")
+        
         try:
             log.info("Last quote: %s", client.get_last_quote(symbol))
         except Exception:
             log.info("Last quote: n/a")
+        
         last_quote_value = None
         try:
             last_quote = client.get_last_quote(symbol)
@@ -570,43 +605,50 @@ def main() -> None:
             last_quote_value = None
 
         tabs = st.tabs(["График", "Свечи (O H L C)"])
+        
         with tabs[0]:
             bars = service.get_bars(symbol, timeframe, days_back)
             df = _bars_to_df(bars)
+            
             if df.empty:
                 st.warning("Нет данных по свечам")
             else:
                 df_plot_base = _apply_time_shift(df, timeframe)
+                
+                # Находим важные экстремумы
                 is_low, is_high = _important_extremes(df_plot_base, important_window, important_distance)
-                st.caption(f"Важные экстремумы: min={int(is_low.sum())}, max={int(is_high.sum())}")
+                
+                st.caption(f"Важные экстремумы: минимумов={int(is_low.sum())}, максимумов={int(is_high.sum())}")
+                
                 if int(is_low.sum()) + int(is_high.sum()) == 0:
-                    st.info("По текущему диапазону формула не нашла важные экстремумы.")
+                    st.info("По текущим параметрам не найдено важных экстремумов. Попробуйте уменьшить расстояние D или увеличить окно.")
                 else:
                     with st.expander("Список важных экстремумов"):
                         points = []
                         for idx, row in df_plot_base[is_low].iterrows():
-                            points.append(
-                                {
-                                    "type": "MIN",
-                                    "timestamp": row["timestamp"],
-                                    "low": row["low"],
-                                    "high": row["high"],
-                                    "close": row["close"],
-                                }
-                            )
+                            points.append({
+                                "type": "MIN",
+                                "timestamp": row["timestamp"],
+                                "low": row["low"],
+                                "high": row["high"],
+                                "close": row["close"],
+                                "зона_поддержки": f"{row['low']:.1f}-{row['close']:.1f}"
+                            })
                         for idx, row in df_plot_base[is_high].iterrows():
-                            points.append(
-                                {
-                                    "type": "MAX",
-                                    "timestamp": row["timestamp"],
-                                    "low": row["low"],
-                                    "high": row["high"],
-                                    "close": row["close"],
-                                }
-                            )
+                            points.append({
+                                "type": "MAX",
+                                "timestamp": row["timestamp"],
+                                "low": row["low"],
+                                "high": row["high"],
+                                "close": row["close"],
+                                "зона_сопротивления": f"{row['close']:.1f}-{row['high']:.1f}"
+                            })
+                        
                         if points:
                             st.dataframe(pd.DataFrame(points), use_container_width=True)
+                
                 df_plot = _append_synthetic_bar(df_plot_base, timeframe, last_quote_value)
+                
                 fig = _plot_candles(
                     df_plot,
                     f"{symbol} {timeframe}",
@@ -614,6 +656,7 @@ def main() -> None:
                     important_window=important_window,
                     important_distance=important_distance,
                 )
+                
                 st.plotly_chart(fig, use_container_width=True)
 
         with tabs[1]:
@@ -628,12 +671,11 @@ def main() -> None:
                 tf_df = _apply_time_shift(tf_df, tf)
                 tf_df = _append_synthetic_bar(tf_df, tf, last_quote_value)
                 ohlcv = tf_df[["timestamp", "open", "high", "low", "close"]].copy()
-                ohlcv = ohlcv.rename(
-                    columns={"open": "O", "high": "H", "low": "L", "close": "C"}
-                )
+                ohlcv = ohlcv.rename(columns={"open": "O", "high": "H", "low": "L", "close": "C"})
                 st.dataframe(ohlcv, use_container_width=True)
 
         col1, col2 = st.columns(2)
+        
         with col1:
             st.subheader("Позиции")
             account = service.get_account(account_id)
@@ -643,8 +685,10 @@ def main() -> None:
             for pos in positions:
                 daily_pnl += float(pos.get("daily_pnl", {}).get("value", 0) or 0)
                 unrealized_pnl += float(pos.get("unrealized_pnl", {}).get("value", 0) or 0)
+            
             st.metric("PnL (дневной)", f"{daily_pnl:.2f}")
             st.metric("PnL (нереализ.)", f"{unrealized_pnl:.2f}")
+            
             if positions:
                 st.dataframe(pd.DataFrame(positions))
             else:
@@ -699,15 +743,14 @@ def main() -> None:
         st.subheader("Статус бота")
         mode = main_cfg.get("mode", "paper")
         limits = main_cfg.get("risk_limits", {})
-        st.write(
-            {
-                "mode": mode,
-                "max_position_per_symbol": limits.get("max_position_per_symbol"),
-                "max_trades_per_day": limits.get("max_trades_per_day"),
-                "daily_loss_limit": limits.get("daily_loss_limit"),
-                "hard_stop": False,
-            }
-        )
+        st.write({
+            "mode": mode,
+            "max_position_per_symbol": limits.get("max_position_per_symbol"),
+            "max_trades_per_day": limits.get("max_trades_per_day"),
+            "daily_loss_limit": limits.get("daily_loss_limit"),
+            "hard_stop": False,
+        })
+        
     except Exception as exc:
         log.error("Dashboard error: %s", exc)
         st.error(f"Ошибка: {exc}")
