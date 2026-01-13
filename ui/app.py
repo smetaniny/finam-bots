@@ -3,6 +3,7 @@ from __future__ import annotations
 import os
 from typing import List
 
+import numpy as np
 import pandas as pd
 import plotly.graph_objects as go
 import streamlit as st
@@ -15,6 +16,12 @@ from core.interfaces import Bar
 from ui.data_service import FinamDataService
 
 MOSCOW_TZ = "Europe/Moscow"
+FIGURE_POINTS = 100
+TIMEFRAME_FIGURE_MULTIPLIER = {
+    "TIME_FRAME_H1": 1.0,
+    "TIME_FRAME_H4": 1.5,
+    "TIME_FRAME_D": 2.0,
+}
 
 
 def _bars_to_df(bars: List[Bar]) -> pd.DataFrame:
@@ -33,6 +40,7 @@ def _bars_to_df(bars: List[Bar]) -> pd.DataFrame:
     )
     if not df.empty:
         df["timestamp"] = pd.to_datetime(df["timestamp"], utc=True)
+        df = df.sort_values("timestamp").reset_index(drop=True)
     return df
 
 
@@ -40,6 +48,7 @@ def _apply_time_shift(df: pd.DataFrame, timeframe: str) -> pd.DataFrame:
     if df.empty:
         return df
     shift = {
+        "TIME_FRAME_H1": pd.Timedelta(hours=1),
         "TIME_FRAME_H4": pd.Timedelta(hours=1),
     }.get(timeframe)
     result = df.copy()
@@ -49,7 +58,223 @@ def _apply_time_shift(df: pd.DataFrame, timeframe: str) -> pd.DataFrame:
     return result
 
 
-def _plot_candles(df: pd.DataFrame, title: str) -> go.Figure:
+def _append_synthetic_bar(df: pd.DataFrame, timeframe: str, last_quote_value: float | None) -> pd.DataFrame:
+    if df.empty or last_quote_value is None:
+        return df
+    now_msk = pd.Timestamp.now(tz=MOSCOW_TZ)
+    if timeframe == "TIME_FRAME_H1":
+        current_mark = now_msk.floor("H") + pd.Timedelta(hours=1)
+    elif timeframe == "TIME_FRAME_H4":
+        current_mark = now_msk.floor("4H") + pd.Timedelta(hours=1)
+    elif timeframe == "TIME_FRAME_D":
+        current_mark = now_msk.normalize()
+    else:
+        return df
+    synthetic = pd.DataFrame(
+        [
+            {
+                "timestamp": current_mark,
+                "open": last_quote_value,
+                "high": last_quote_value,
+                "low": last_quote_value,
+                "close": last_quote_value,
+                "volume": 0.0,
+            }
+        ]
+    )
+    combined = pd.concat(
+        [
+            df,
+            synthetic,
+        ],
+        ignore_index=True,
+    )
+    return combined.drop_duplicates(subset=["timestamp"], keep="last")
+
+
+def _price_step_from_asset(asset: dict) -> float | None:
+    min_step = asset.get("minStep") or asset.get("min_step")
+    decimals = asset.get("decimals")
+    if min_step is None or decimals is None:
+        return None
+    try:
+        return float(min_step) / (10 ** int(decimals))
+    except (TypeError, ValueError):
+        return None
+
+
+def _point_value_from_asset(asset: dict) -> float | None:
+    decimals = asset.get("decimals")
+    if decimals is None:
+        return None
+    try:
+        return 10 ** (-int(decimals))
+    except (TypeError, ValueError):
+        return None
+
+
+def _auto_distance_for_timeframe(point_value: float, timeframe: str) -> float:
+    multiplier = TIMEFRAME_FIGURE_MULTIPLIER.get(timeframe, 1.5)
+    return point_value * FIGURE_POINTS * multiplier
+
+
+def _important_extremes(
+    df: pd.DataFrame, window: int, distance: float
+) -> tuple[pd.Series, pd.Series]:
+    if df.empty or window < 2:
+        return pd.Series(dtype=bool, index=df.index), pd.Series(dtype=bool, index=df.index)
+
+    low = df["low"].values
+    high = df["high"].values
+    close = df["close"].values
+
+    n = len(df)
+    is_low = np.zeros(n, dtype=bool)
+    is_high = np.zeros(n, dtype=bool)
+
+    min_candle_size = distance * 0.03
+
+    for i in range(n):
+        if i > 0 and i < n - 1 and low[i] < low[i - 1] and low[i] < low[i + 1]:
+            left_ok = False
+            for j in range(1, min(window, i) + 1):
+                if low[i] < low[i - j] - min_candle_size:
+                    left_ok = True
+                    break
+
+            right_ok = False
+            look_right = min(window // 2, n - i - 1)
+            for j in range(1, look_right + 1):
+                if low[i + j] > low[i] + distance:
+                    right_ok = True
+                    break
+
+            candle_size = high[i] - low[i]
+            close_ok = candle_size > min_candle_size and (close[i] - low[i]) > (candle_size * 0.15)
+
+            false_break = False
+            look_forward = min(window, n - i - 1)
+            for j in range(1, look_forward + 1):
+                if low[i + j] < low[i] - (distance * 0.3):
+                    false_break = True
+                    break
+
+            is_low[i] = left_ok and right_ok and close_ok and not false_break
+
+        if i > 0 and i < n - 1 and high[i] > high[i - 1] and high[i] > high[i + 1]:
+            left_ok = False
+            for j in range(1, min(window, i) + 1):
+                if high[i] > high[i - j] + min_candle_size:
+                    left_ok = True
+                    break
+
+            right_ok = False
+            look_right = min(window // 2, n - i - 1)
+            for j in range(1, look_right + 1):
+                if high[i + j] < high[i] - distance:
+                    right_ok = True
+                    break
+
+            candle_size = high[i] - low[i]
+            close_ok = candle_size > min_candle_size and (high[i] - close[i]) > (candle_size * 0.15)
+
+            false_break = False
+            look_forward = min(window, n - i - 1)
+            for j in range(1, look_forward + 1):
+                if high[i + j] > high[i] + (distance * 0.3):
+                    false_break = True
+                    break
+
+            is_high[i] = left_ok and right_ok and close_ok and not false_break
+
+    return pd.Series(is_low, index=df.index), pd.Series(is_high, index=df.index)
+
+
+def _add_zones_from_extremes(
+    fig: go.Figure, df: pd.DataFrame, is_low: pd.Series, is_high: pd.Series
+) -> None:
+    if df.empty:
+        return
+
+    support_points = df[is_low]
+    if not support_points.empty:
+        for _, row in support_points.iterrows():
+            if row["close"] > row["low"]:
+                fig.add_hrect(
+                    y0=row["low"],
+                    y1=row["close"],
+                    fillcolor="rgba(34, 197, 94, 0.15)",
+                    line_width=1,
+                    line_color="rgba(34, 197, 94, 0.7)",
+                    annotation_text=f"S: {row['low']:.1f}-{row['close']:.1f}",
+                    annotation_position="top left",
+                    annotation_font_size=10,
+                    annotation_font_color="#22c55e",
+                )
+
+    resistance_points = df[is_high]
+    if not resistance_points.empty:
+        for _, row in resistance_points.iterrows():
+            if row["high"] > row["close"]:
+                fig.add_hrect(
+                    y0=row["close"],
+                    y1=row["high"],
+                    fillcolor="rgba(239, 68, 68, 0.15)",
+                    line_width=1,
+                    line_color="rgba(239, 68, 68, 0.7)",
+                    annotation_text=f"R: {row['close']:.1f}-{row['high']:.1f}",
+                    annotation_position="bottom left",
+                    annotation_font_size=10,
+                    annotation_font_color="#ef4444",
+                )
+
+
+def _add_important_extremes_markers(
+    fig: go.Figure, df: pd.DataFrame, is_low: pd.Series, is_high: pd.Series
+) -> None:
+    if df.empty:
+        return
+    rng = (df["high"] - df["low"])
+    offset = rng.median()
+    if not pd.notna(offset) or offset == 0:
+        offset = float(df["high"].iloc[-1]) * 0.003
+    else:
+        offset = float(offset) * 0.6
+    low_points = df[is_low]
+    high_points = df[is_high]
+    if not low_points.empty:
+        fig.add_trace(
+            go.Scatter(
+                x=low_points["timestamp"],
+                y=low_points["low"] - offset,
+                mode="markers",
+                marker=dict(symbol="line-ew", size=40, color="#22c55e"),
+                name="Important L",
+                showlegend=False,
+                opacity=0.9,
+            )
+        )
+    if not high_points.empty:
+        fig.add_trace(
+            go.Scatter(
+                x=high_points["timestamp"],
+                y=high_points["high"] + offset,
+                mode="markers",
+                marker=dict(symbol="line-ew", size=40, color="#ef4444"),
+                name="Important H",
+                showlegend=False,
+                opacity=0.9,
+            )
+        )
+
+
+def _plot_candles(
+    df: pd.DataFrame,
+    title: str,
+    markers_df: pd.DataFrame | None = None,
+    important_window: int = 10,
+    important_distance: float = 150.0,
+) -> go.Figure:
     fig = go.Figure(
         data=[
             go.Candlestick(
@@ -66,6 +291,11 @@ def _plot_candles(df: pd.DataFrame, title: str) -> go.Figure:
         ]
     )
     _add_pattern_labels(fig, df)
+    if markers_df is None:
+        markers_df = df
+    is_low, is_high = _important_extremes(markers_df, important_window, important_distance)
+    _add_zones_from_extremes(fig, markers_df, is_low, is_high)
+    _add_important_extremes_markers(fig, markers_df, is_low, is_high)
     fig.update_layout(
         title=title,
         height=560,
@@ -254,6 +484,51 @@ def main() -> None:
             ],
             index=0,
         )
+        st.subheader("Важные экстремумы")
+        auto_distance = None
+        auto_step = None
+        auto_point = None
+        try:
+            asset_info = client.get_asset(symbol, account_id=account_id)
+            auto_step = _price_step_from_asset(asset_info)
+            auto_point = _point_value_from_asset(asset_info)
+            if auto_point is not None:
+                auto_distance = _auto_distance_for_timeframe(auto_point, timeframe)
+        except Exception:
+            auto_distance = None
+            auto_step = None
+            auto_point = None
+        use_auto_distance = st.checkbox(
+            "D из параметров инструмента",
+            value=auto_distance is not None,
+        )
+        if auto_distance is not None:
+            multiplier = TIMEFRAME_FIGURE_MULTIPLIER.get(timeframe, 1.5)
+            st.caption(
+                "Авто D = {distance:g} (1 фигура = {points} пунктов, пункт = {point:g}, "
+                "шаг цены = {step:g}, множитель {multiplier:g})".format(
+                    distance=auto_distance,
+                    points=FIGURE_POINTS,
+                    point=auto_point or 0,
+                    step=auto_step or 0,
+                    multiplier=multiplier,
+                )
+            )
+        important_window = st.slider(
+            "Окно анализа",
+            5,
+            20,
+            10,
+            help="Сколько свечей анализировать слева и справа от экстремума",
+        )
+        important_distance_manual = st.slider(
+            "Минимальное движение",
+            50,
+            300,
+            150,
+            help="Минимальное движение цены после экстремума (пунктов)",
+        )
+        important_distance = auto_distance if use_auto_distance and auto_distance is not None else important_distance_manual
         ranges = {
             "TIME_FRAME_D": 60,
             "TIME_FRAME_H4": 30,
@@ -287,25 +562,62 @@ def main() -> None:
             log.info("Last quote: %s", client.get_last_quote(symbol))
         except Exception:
             log.info("Last quote: n/a")
-        tabs = st.tabs(["График", "Свечи (O H L C V)"])
+        last_quote_value = None
+        try:
+            last_quote = client.get_last_quote(symbol)
+            last_quote_value = float(last_quote.get("quote", {}).get("last", {}).get("value"))
+        except Exception:
+            last_quote_value = None
+
+        tabs = st.tabs(["График", "Свечи (O H L C)"])
         with tabs[0]:
             bars = service.get_bars(symbol, timeframe, days_back)
             df = _bars_to_df(bars)
             if df.empty:
                 st.warning("Нет данных по свечам")
             else:
-                df_plot = _apply_time_shift(df, timeframe)
-                fig = _plot_candles(df_plot, f"{symbol} {timeframe}")
+                df_plot_base = _apply_time_shift(df, timeframe)
+                is_low, is_high = _important_extremes(df_plot_base, important_window, important_distance)
+                st.caption(f"Важные экстремумы: min={int(is_low.sum())}, max={int(is_high.sum())}")
+                if int(is_low.sum()) + int(is_high.sum()) == 0:
+                    st.info("По текущему диапазону формула не нашла важные экстремумы.")
+                else:
+                    with st.expander("Список важных экстремумов"):
+                        points = []
+                        for idx, row in df_plot_base[is_low].iterrows():
+                            points.append(
+                                {
+                                    "type": "MIN",
+                                    "timestamp": row["timestamp"],
+                                    "low": row["low"],
+                                    "high": row["high"],
+                                    "close": row["close"],
+                                }
+                            )
+                        for idx, row in df_plot_base[is_high].iterrows():
+                            points.append(
+                                {
+                                    "type": "MAX",
+                                    "timestamp": row["timestamp"],
+                                    "low": row["low"],
+                                    "high": row["high"],
+                                    "close": row["close"],
+                                }
+                            )
+                        if points:
+                            st.dataframe(pd.DataFrame(points), use_container_width=True)
+                df_plot = _append_synthetic_bar(df_plot_base, timeframe, last_quote_value)
+                fig = _plot_candles(
+                    df_plot,
+                    f"{symbol} {timeframe}",
+                    markers_df=df_plot_base,
+                    important_window=important_window,
+                    important_distance=important_distance,
+                )
                 st.plotly_chart(fig, use_container_width=True)
 
         with tabs[1]:
-            st.subheader("Свечи (O H L C V)")
-            last_quote_value = None
-            try:
-                last_quote = client.get_last_quote(symbol)
-                last_quote_value = float(last_quote.get("quote", {}).get("last", {}).get("value"))
-            except Exception:
-                last_quote_value = None
+            st.subheader("Свечи (O H L C)")
             for tf in ("TIME_FRAME_D", "TIME_FRAME_H4", "TIME_FRAME_H1"):
                 tf_bars = service.get_bars(symbol, tf, ranges[tf])
                 tf_df = _bars_to_df(tf_bars)
@@ -314,39 +626,10 @@ def main() -> None:
                     st.info("Нет данных")
                     continue
                 tf_df = _apply_time_shift(tf_df, tf)
-                if last_quote_value is not None:
-                    now_msk = pd.Timestamp.now(tz=MOSCOW_TZ)
-                    if tf == "TIME_FRAME_H1":
-                        current_mark = now_msk.floor("H")
-                    elif tf == "TIME_FRAME_H4":
-                        current_mark = now_msk.floor("4H") + pd.Timedelta(hours=1)
-                    elif tf == "TIME_FRAME_D":
-                        current_mark = now_msk.normalize()
-                    else:
-                        current_mark = None
-                    if current_mark is not None:
-                        if current_mark not in set(tf_df["timestamp"]):
-                            tf_df = pd.concat(
-                                [
-                                    tf_df,
-                                    pd.DataFrame(
-                                        [
-                                            {
-                                                "timestamp": current_mark,
-                                                "open": last_quote_value,
-                                                "high": last_quote_value,
-                                                "low": last_quote_value,
-                                                "close": last_quote_value,
-                                                "volume": 0.0,
-                                            }
-                                        ]
-                                    ),
-                                ],
-                                ignore_index=True,
-                            )
-                ohlcv = tf_df[["timestamp", "open", "high", "low", "close", "volume"]].copy()
+                tf_df = _append_synthetic_bar(tf_df, tf, last_quote_value)
+                ohlcv = tf_df[["timestamp", "open", "high", "low", "close"]].copy()
                 ohlcv = ohlcv.rename(
-                    columns={"open": "O", "high": "H", "low": "L", "close": "C", "volume": "V"}
+                    columns={"open": "O", "high": "H", "low": "L", "close": "C"}
                 )
                 st.dataframe(ohlcv, use_container_width=True)
 
