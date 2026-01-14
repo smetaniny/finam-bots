@@ -591,6 +591,7 @@ def _plot_candles(
     extreme_points: List[Dict[str, Any]] = None,
     show_zones: bool = True,
     show_extremes_markers: bool = True,
+    overlay_text: str | None = None,
 ) -> go.Figure:
     """Создает свечной график с зонами поддержки/сопротивления."""
     fig = go.Figure(
@@ -619,6 +620,21 @@ def _plot_candles(
     # Добавляем маркеры экстремумов
     if show_extremes_markers and extreme_points:
         _add_extreme_markers(fig, df, extreme_points)
+
+    if overlay_text:
+        fig.add_annotation(
+            text=overlay_text,
+            xref="paper",
+            yref="paper",
+            x=0.01,
+            y=0.99,
+            showarrow=False,
+            align="left",
+            bgcolor="rgba(15, 23, 42, 0.7)",
+            bordercolor="rgba(148, 163, 184, 0.4)",
+            borderwidth=1,
+            font=dict(size=11, color="#e5e7eb"),
+        )
     
     fig.update_layout(
         title=title,
@@ -657,6 +673,156 @@ def _plot_candles(
     )
     
     return fig
+
+
+def _trend_summary(df: pd.DataFrame) -> Dict[str, Any]:
+    if df.empty:
+        return {
+            "label": "НЕТ ДАННЫХ",
+            "start": 0.0,
+            "end": 0.0,
+            "move": 0.0,
+            "pct": 0.0,
+            "low": 0.0,
+            "high": 0.0,
+        }
+    start = float(df["close"].iloc[0])
+    end = float(df["close"].iloc[-1])
+    move = end - start
+    pct = (move / start * 100.0) if start else 0.0
+    low = float(df["low"].min())
+    high = float(df["high"].max())
+    rng = high - low
+    ratio = abs(move) / rng if rng else 0.0
+    if ratio < 0.35:
+        label = "БОКОВИК"
+    else:
+        label = "ВОСХОДЯЩИЙ" if move > 0 else "НИСХОДЯЩИЙ"
+    return {
+        "label": label,
+        "start": start,
+        "end": end,
+        "move": move,
+        "pct": pct,
+        "low": low,
+        "high": high,
+    }
+
+
+def _zone_summary(zones: List[Dict[str, Any]], price: float) -> Dict[str, Any]:
+    in_zone = None
+    support = None
+    resistance = None
+    for zone in zones:
+        if zone["zone_low"] <= price <= zone["zone_high"]:
+            in_zone = zone
+            break
+    support_zones = [
+        z for z in zones if z["type"] == "support" and z["zone_high"] <= price
+    ]
+    resistance_zones = [
+        z for z in zones if z["type"] == "resistance" and z["zone_low"] >= price
+    ]
+    if support_zones:
+        support = max(support_zones, key=lambda z: z["zone_high"])
+    if resistance_zones:
+        resistance = min(resistance_zones, key=lambda z: z["zone_low"])
+    return {"in_zone": in_zone, "support": support, "resistance": resistance}
+
+
+def _zone_label(zone: Dict[str, Any] | None) -> str:
+    if not zone:
+        return "н/д"
+    return f"{zone['zone_low']:.1f}-{zone['zone_high']:.1f}"
+
+
+def _pattern_summary(df: pd.DataFrame) -> str:
+    flagged = _pattern_flags(df)
+    if flagged.empty:
+        return "паттерн: н/д"
+    last = flagged.iloc[-1]
+    patterns = []
+    if last["pattern_pb"]:
+        patterns.append("пин-бар")
+    if last["pattern_e"]:
+        patterns.append("поглощение")
+    if last["pattern_kr"]:
+        patterns.append("key reversal")
+    if last["pattern_doji"]:
+        patterns.append("доджи")
+    if not patterns:
+        return "паттерн: нет"
+    return "паттерн: " + ", ".join(patterns)
+
+
+def _build_market_analysis(
+    symbol: str,
+    d1_df: pd.DataFrame,
+    h4_df: pd.DataFrame,
+    h1_df: pd.DataFrame,
+    h4_zones: List[Dict[str, Any]],
+    last_quote_value: float | None,
+) -> Tuple[str, str]:
+    trend = _trend_summary(d1_df)
+    current_price = (
+        float(last_quote_value)
+        if last_quote_value is not None
+        else (float(h1_df["close"].iloc[-1]) if not h1_df.empty else 0.0)
+    )
+    zones = _zone_summary(h4_zones, current_price)
+    pattern_text = _pattern_summary(h1_df)
+    now_msk = pd.Timestamp.now(tz=MOSCOW_TZ).strftime("%Y-%m-%d %H:%M")
+
+    in_zone = zones["in_zone"]
+    if in_zone:
+        zone_type = "сопротивления" if in_zone["type"] == "resistance" else "поддержки"
+        zone_note = f"Цена в зоне {zone_type}: {_zone_label(in_zone)}"
+    else:
+        zone_note = "Цена между зонами"
+
+    scenario = "Ожидание подтверждения на H1"
+    if in_zone and in_zone["type"] == "resistance":
+        scenario = "Приоритет продавцов: ждать медвежий паттерн или пробой вверх"
+    elif in_zone and in_zone["type"] == "support":
+        scenario = "Приоритет покупателей: ждать бычий паттерн или пробой вниз"
+
+    analysis_md = "\n".join(
+        [
+            f"# АНАЛИЗ РЫНКА {symbol} (авто)",
+            "",
+            f"Обновлено: **{now_msk} (MSK)**",
+            "",
+            "## 1. D1 — тренд",
+            f"- Старт: **{trend['start']:.1f}**",
+            f"- Текущая: **{trend['end']:.1f}**",
+            f"- Диапазон: **{trend['low']:.1f} – {trend['high']:.1f}**",
+            f"- Движение: **{trend['move']:.1f}** ({trend['pct']:.1f}%)",
+            f"- Режим: **{trend['label']}**",
+            "",
+            "## 2. H4 — уровни",
+            f"- Поддержка: **{_zone_label(zones['support'])}**",
+            f"- Сопротивление: **{_zone_label(zones['resistance'])}**",
+            f"- {zone_note}",
+            "",
+            "## 3. H1 — текущая ситуация",
+            f"- Цена: **{current_price:.1f}**",
+            f"- {pattern_text}",
+            "",
+            "## 4. Сценарий",
+            f"- {scenario}",
+        ]
+    )
+
+    overlay_text = "<br>".join(
+        [
+            f"D1: {trend['label']} ({trend['low']:.1f}-{trend['high']:.1f})",
+            f"H4: S {_zone_label(zones['support'])} | R {_zone_label(zones['resistance'])}",
+            f"H1: {current_price:.1f} | {pattern_text}",
+            zone_note,
+        ]
+    )
+
+    return analysis_md, overlay_text
 
 
 def _pattern_flags(df: pd.DataFrame) -> pd.DataFrame:
@@ -868,6 +1034,7 @@ def main() -> None:
     load_dotenv()
     st.set_page_config(page_title="Finam Bot Dashboard", layout="wide")
     log = get_logger("dashboard")
+    st.markdown("<meta http-equiv='refresh' content='60'>", unsafe_allow_html=True)
 
     account_id = os.getenv("FINAM_ACCOUNT_ID")
     if not account_id:
@@ -969,7 +1136,29 @@ def main() -> None:
         except Exception:
             last_quote_value = None
 
-        tabs = st.tabs(["График", "Свечи (O H L C)"])
+        analysis_d1_df = _apply_time_shift(
+            _bars_to_df(service.get_bars(symbol, "TIME_FRAME_D", ranges["TIME_FRAME_D"])),
+            "TIME_FRAME_D",
+        )
+        analysis_h4_df = _apply_time_shift(
+            _bars_to_df(service.get_bars(symbol, "TIME_FRAME_H4", ranges["TIME_FRAME_H4"])),
+            "TIME_FRAME_H4",
+        )
+        analysis_h1_df = _apply_time_shift(
+            _bars_to_df(service.get_bars(symbol, "TIME_FRAME_H1", ranges["TIME_FRAME_H1"])),
+            "TIME_FRAME_H1",
+        )
+        h4_zones, _ = _important_extremes_with_zones(analysis_h4_df, RTS_MIN_DISTANCE_H4)
+        analysis_md, overlay_text = _build_market_analysis(
+            symbol=symbol,
+            d1_df=analysis_d1_df,
+            h4_df=analysis_h4_df,
+            h1_df=analysis_h1_df,
+            h4_zones=h4_zones,
+            last_quote_value=last_quote_value,
+        )
+
+        tabs = st.tabs(["График", "Свечи (O H L C)", "Анализ"])
         
         with tabs[0]:
             bars = service.get_bars(symbol, timeframe, days_back)
@@ -1069,6 +1258,7 @@ def main() -> None:
                     extreme_points=extreme_points,
                     show_zones=True,
                     show_extremes_markers=(timeframe == "TIME_FRAME_H4"),
+                    overlay_text=overlay_text,
                 )
                 
                 st.plotly_chart(fig, use_container_width=True)
@@ -1087,6 +1277,10 @@ def main() -> None:
                 ohlcv = tf_df[["timestamp", "open", "high", "low", "close"]].copy()
                 ohlcv = ohlcv.rename(columns={"open": "O", "high": "H", "low": "L", "close": "C"})
                 st.dataframe(ohlcv, use_container_width=True)
+
+        with tabs[2]:
+            st.subheader("Авто‑анализ")
+            st.markdown(analysis_md)
 
         col1, col2 = st.columns(2)
         
