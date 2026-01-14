@@ -667,6 +667,21 @@ def _pattern_flags(df: pd.DataFrame) -> pd.DataFrame:
     rng = (result["high"] - result["low"]).replace(0, 1e-9)
     upper = result["high"] - result[["open", "close"]].max(axis=1)
     lower = result[["open", "close"]].min(axis=1) - result["low"]
+    body_top = result[["open", "close"]].max(axis=1)
+    body_bottom = result[["open", "close"]].min(axis=1)
+
+    long_shadow = 2.0
+    small_body = 0.3
+    doji_body = 0.1
+    opp_shadow_max = 0.3
+    body_upper_pos = result["low"] + rng * 0.6
+    body_lower_pos = result["low"] + rng * 0.4
+
+    lower_long = lower >= long_shadow * body
+    upper_long = upper >= long_shadow * body
+    both_long = lower_long & upper_long
+    doji = body <= doji_body * rng
+    small_body_flag = body <= small_body * rng
 
     pin_bar = ((upper >= 2 * body) & (lower <= 0.3 * body)) | (
         (lower >= 2 * body) & (upper <= 0.3 * body)
@@ -693,6 +708,26 @@ def _pattern_flags(df: pd.DataFrame) -> pd.DataFrame:
     result["pattern_pb"] = pin_bar.fillna(False)
     result["pattern_e"] = engulfing.fillna(False)
     result["pattern_kr"] = key_reversal.fillna(False)
+    result["pattern_ls"] = (lower_long | upper_long).fillna(False)
+    result["pattern_ls_lower"] = lower_long.fillna(False)
+    result["pattern_ls_upper"] = upper_long.fillna(False)
+    result["pattern_ls_both"] = both_long.fillna(False)
+    result["pattern_doji"] = doji.fillna(False)
+    result["pattern_doji_long"] = (doji & both_long).fillna(False)
+    result["pattern_gravestone"] = (doji & upper_long & (lower <= opp_shadow_max * body)).fillna(False)
+    result["pattern_rickshaw"] = (doji & both_long & (body_top >= body_lower_pos) & (body_bottom <= body_upper_pos)).fillna(False)
+    result["pattern_hammer_shape"] = (
+        lower_long & small_body_flag & (upper <= opp_shadow_max * body) & (body_bottom >= body_upper_pos)
+    ).fillna(False)
+    result["pattern_inverted_shape"] = (
+        upper_long & small_body_flag & (lower <= opp_shadow_max * body) & (body_top <= body_lower_pos)
+    ).fillna(False)
+    result["pattern_doji_hammer"] = (doji & lower_long).fillna(False)
+    result["pattern_doji_star"] = (doji & upper_long).fillna(False)
+    result["pattern_spinning_lower"] = (lower_long & ~small_body_flag).fillna(False)
+    result["pattern_spinning_upper"] = (upper_long & ~small_body_flag).fillna(False)
+    result["pattern_inside_ls"] = ((result["high"] <= prev_high) & (result["low"] >= prev_low) & (lower_long | upper_long)).fillna(False)
+    result["pattern_outside_ls"] = ((result["high"] >= prev_high) & (result["low"] <= prev_low) & (lower_long | upper_long)).fillna(False)
     return result
 
 
@@ -704,6 +739,19 @@ def _add_pattern_labels(fig: go.Figure, df: pd.DataFrame) -> None:
         "PB": "Пин‑бар — свеча с длинным хвостом (тенью) и маленьким телом у одного края, сигнал возможного разворота.",
         "E": "Поглощение (Engulfing) — свеча, тело которой полностью перекрывает тело предыдущей в противоположную сторону.",
         "KR": "Key Reversal — разворотный бар: делает новый экстремум против тренда и закрывается в противоположной стороне (часто с большим объемом).",
+        "LS": "Длинная тень (правило 1‑2‑3) — тень в 2–3 раза больше тела.",
+        "HAM": "Молот / висящий человек — маленькое тело у верхней части, длинная нижняя тень (контекст зависит от тренда).",
+        "IH": "Перевернутый молот / падающая звезда — маленькое тело у нижней части, длинная верхняя тень (контекст зависит от тренда).",
+        "DH": "Доджи‑молот — почти нет тела, длинная нижняя тень.",
+        "DS": "Доджи‑звезда — почти нет тела, длинная верхняя тень.",
+        "SP-L": "Волчок с длинной нижней тенью — тело среднее, нижняя тень заметно длиннее.",
+        "SP-U": "Волчок с длинной верхней тенью — тело среднее, верхняя тень заметно длиннее.",
+        "DJ": "Доджи — тело очень маленькое, тени примерно равные.",
+        "DJL": "Длинноногий доджи — тело маленькое, обе тени очень длинные.",
+        "GR": "Надгробие доджи — тело внизу, нижней тени почти нет, верхняя очень длинная.",
+        "RK": "Рикша — тело в середине, обе тени очень длинные.",
+        "IN": "Внутренний бар с длинной тенью — диапазон внутри предыдущей свечи.",
+        "OUT": "Внешний бар с акцентом на тень — поглощает предыдущую свечу.",
     }
     labels = []
     for _, row in flagged.iterrows():
@@ -718,6 +766,45 @@ def _add_pattern_labels(fig: go.Figure, df: pd.DataFrame) -> None:
         if row["pattern_kr"]:
             parts.append("KR")
             hover_parts.append(descriptions["KR"])
+        if row["pattern_ls"]:
+            parts.append("LS")
+            hover_parts.append(descriptions["LS"])
+        if row["pattern_hammer_shape"]:
+            parts.append("HAM")
+            hover_parts.append(descriptions["HAM"])
+        if row["pattern_inverted_shape"]:
+            parts.append("IH")
+            hover_parts.append(descriptions["IH"])
+        if row["pattern_doji_hammer"]:
+            parts.append("DH")
+            hover_parts.append(descriptions["DH"])
+        if row["pattern_doji_star"]:
+            parts.append("DS")
+            hover_parts.append(descriptions["DS"])
+        if row["pattern_spinning_lower"]:
+            parts.append("SP-L")
+            hover_parts.append(descriptions["SP-L"])
+        if row["pattern_spinning_upper"]:
+            parts.append("SP-U")
+            hover_parts.append(descriptions["SP-U"])
+        if row["pattern_doji"]:
+            parts.append("DJ")
+            hover_parts.append(descriptions["DJ"])
+        if row["pattern_doji_long"]:
+            parts.append("DJL")
+            hover_parts.append(descriptions["DJL"])
+        if row["pattern_gravestone"]:
+            parts.append("GR")
+            hover_parts.append(descriptions["GR"])
+        if row["pattern_rickshaw"]:
+            parts.append("RK")
+            hover_parts.append(descriptions["RK"])
+        if row["pattern_inside_ls"]:
+            parts.append("IN")
+            hover_parts.append(descriptions["IN"])
+        if row["pattern_outside_ls"]:
+            parts.append("OUT")
+            hover_parts.append(descriptions["OUT"])
         if parts:
             labels.append((row["timestamp"], row["high"], "<br>".join(parts), "<br>".join(hover_parts)))
 
