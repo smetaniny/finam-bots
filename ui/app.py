@@ -1067,57 +1067,12 @@ def main() -> None:
             ],
             index=0,
         )
-        st.subheader("Важные экстремумы")
-        
-        # Автоматические настройки для РТС
-        if timeframe == "TIME_FRAME_H4":
-            default_distance = RTS_MIN_DISTANCE_H4
-            st.info(f"Для H4 (RTS) рекомендую: D={default_distance} (минимум 100 пунктов)")
-        elif timeframe == "TIME_FRAME_H1":
-            default_distance = RTS_MIN_DISTANCE_H1
-            st.info(f"Для H1 рекомендую: D={default_distance} (минимум 50 пунктов)")
-        else:  # D1
-            default_distance = RTS_MIN_DISTANCE_D
-            st.info(f"Для D1 рекомендую: D={default_distance} (минимум 200 пунктов)")
-        
-        important_distance = st.number_input(
-            "Порог расстояния D (пунктов)",
-            min_value=0.0,
-            value=float(default_distance),
-            step=10.0,
-            help="Минимальное движение после экстремума ('1 фигура')"
-        )
-        
-        st.caption("ПРАКТИЧЕСКАЯ ЛОГИКА ПОИСКА ВАЖНЫХ ЭКСТРЕМУМОВ:")
-        st.caption("1. Ключевой принцип: гибкость вместо догмы")
-        st.caption("2. Минимум: Close > Low, цена уходит от минимума")
-        st.caption("3. Максимум: Close < High, цена падает от максимума")
-        st.caption("4. '1 фигура' для РТС H4: 100+ пунктов")
-        
         ranges = {
             "TIME_FRAME_D": 60,
             "TIME_FRAME_H4": 60,
             "TIME_FRAME_H1": 60,
         }
         days_back = ranges[timeframe]
-        st.caption(f"Глубина: {days_back} дней")
-        
-        trades_limit = st.slider("Сделки (лимит)", 10, 200, 50)
-        
-        st.subheader("Стоп/тейк (визуально)")
-        stop_loss_pct = st.number_input("Stop Loss %", min_value=0.0, max_value=50.0, value=0.0, step=0.1)
-        take_profit_pct = st.number_input("Take Profit %", min_value=0.0, max_value=200.0, value=0.0, step=0.1)
-        
-        if st.button("Проверить MarketData"):
-            for check_symbol in ("SBER@MISX", "RMH6@RTSX"):
-                try:
-                    quote = client.get_last_quote(check_symbol)
-                    log.info("Last quote check (%s): %s", check_symbol, quote)
-                    st.success(f"{check_symbol}: OK")
-                except Exception as exc:
-                    log.warning("Last quote check (%s) failed: %s", check_symbol, exc)
-                    st.error(f"{check_symbol}: ошибка lastquote")
-
     try:
         with open("configs/main.yaml", "r", encoding="utf-8") as handle:
             main_cfg = yaml.safe_load(handle) or {}
@@ -1160,6 +1115,19 @@ def main() -> None:
             h4_zones=h4_zones,
             last_quote_value=last_quote_value,
         )
+        overlay_text = ""
+        analysis_path = os.path.join(
+            "Фьючерсы",
+            "RTSM",
+            "RTSM-3.26 (15.01.2026)",
+            "Анализ рынка.md",
+        )
+        try:
+            os.makedirs(os.path.dirname(analysis_path), exist_ok=True)
+            with open(analysis_path, "w", encoding="utf-8") as handle:
+                handle.write(analysis_md)
+        except Exception:
+            pass
 
         tabs = st.tabs(["График", "Свечи (O H L C)", "Анализ"])
         
@@ -1172,85 +1140,16 @@ def main() -> None:
             else:
                 df_plot_base = _apply_time_shift(df, timeframe)
                 
-                # Находим важные экстремумы и зоны
+                # Находим важные экстремумы и зоны (авто по 1.5 * AvgRange(20))
+                avg_range = float((df_plot_base["high"] - df_plot_base["low"]).tail(20).mean())
+                important_distance = max(0.0, 1.5 * avg_range)
                 zones, extreme_points = _important_extremes_with_zones(df_plot_base, important_distance)
-                
-                # Показываем статистику
-                support_zones = len([z for z in zones if z["type"] == "support"])
-                resistance_zones = len([z for z in zones if z["type"] == "resistance"])
-                min_points = len([p for p in extreme_points if p["type"] == "MIN"])
-                max_points = len([p for p in extreme_points if p["type"] == "MAX"])
-                
-                st.caption(f"Найдено: {support_zones} зон поддержки, {resistance_zones} зон сопротивления")
-                st.caption(f"Точек экстремумов: {min_points} минимумов, {max_points} максимумов")
-                
+
                 if not zones:
                     st.warning("Не найдено важных экстремумов. Возможные причины:")
                     st.write("1. Параметр D слишком большой - уменьшите")
                     st.write("2. На графике нет четких разворотов")
                     st.write("3. Недостаточно данных для анализа")
-                else:
-                    with st.expander("Детали зон поддержки/сопротивления"):
-                        zones_df = pd.DataFrame([
-                            {
-                                "Тип": "Поддержка" if z["type"] == "support" else "Сопротивление",
-                                "Зона": f"{z['zone_low']:.1f}-{z['zone_high']:.1f}",
-                                "Ширина": f"{z['zone_high'] - z['zone_low']:.1f}",
-                                "Точка": f"{z.get('original_low', z['zone_low']):.1f}" if z["type"] == "support" else f"{z.get('original_high', z['zone_high']):.1f}"
-                            }
-                            for z in zones
-                        ])
-                        st.dataframe(zones_df, use_container_width=True)
-                    
-                    with st.expander("Список важных экстремумов"):
-                        if extreme_points:
-                            extremes_df = pd.DataFrame(extreme_points)
-                            extremes_df["timestamp"] = pd.to_datetime(extremes_df["timestamp"])
-                            extremes_df = extremes_df[["type", "timestamp", "price", "close", "zone"]]
-                            extremes_df.columns = ["Тип", "Время", "Экстремум", "Закрытие", "Зона"]
-                            st.dataframe(extremes_df, use_container_width=True)
-                    
-                    with st.expander("Детальная отладка экстремумов"):
-                        if extreme_points:
-                            st.write("Найденные точки экстремумов:")
-                            for i, point in enumerate(extreme_points):
-                                st.write(
-                                    f"{i}. {point['type']} в {point['timestamp']}: "
-                                    f"цена={point['price']}, зона={point['zone']}"
-                                )
-                        
-                        st.write("\nПроверка конкретных свечей из вашего примера:")
-                        test_points = [
-                            ("2025-12-19 14:00:00", "MIN", 1063.0),
-                            ("2025-12-22 12:00:00", "MIN", 1076.0),
-                            ("2025-12-29 13:00:00", "MAX", 1151.5),
-                        ]
-                        
-                        for ts_str, expected_type, expected_price in test_points:
-                            try:
-                                target_ts = pd.Timestamp(ts_str).tz_localize(MOSCOW_TZ)
-                                idx = (df_plot_base["timestamp"] - target_ts).abs().argmin()
-                                
-                                if expected_type == "MIN":
-                                    is_important, zone_info = _find_important_minimum(
-                                        df_plot_base, idx, important_distance
-                                    )
-                                    st.write(
-                                        f"{ts_str} (idx={idx}): MIN={df_plot_base.at[idx, 'low']:.1f}, "
-                                        f"Важный={is_important}, Close>Low="
-                                        f"{df_plot_base.at[idx, 'close'] > df_plot_base.at[idx, 'low']}"
-                                    )
-                                else:
-                                    is_important, zone_info = _find_important_maximum(
-                                        df_plot_base, idx, important_distance
-                                    )
-                                    st.write(
-                                        f"{ts_str} (idx={idx}): MAX={df_plot_base.at[idx, 'high']:.1f}, "
-                                        f"Важный={is_important}, Close<High="
-                                        f"{df_plot_base.at[idx, 'close'] < df_plot_base.at[idx, 'high']}"
-                                    )
-                            except Exception as exc:
-                                st.write(f"Ошибка при проверке {ts_str}: {exc}")
                 
                 df_plot = _append_synthetic_bar(df_plot_base, timeframe, last_quote_value)
                 
@@ -1260,7 +1159,7 @@ def main() -> None:
                     zones=zones,
                     extreme_points=extreme_points,
                     show_zones=True,
-                    show_extremes_markers=(timeframe == "TIME_FRAME_H4"),
+                    show_extremes_markers=True,
                     overlay_text=overlay_text,
                 )
                 
@@ -1292,8 +1191,13 @@ def main() -> None:
                 )
 
         with tabs[2]:
-            st.subheader("Авто‑анализ")
-            st.markdown(analysis_md)
+            st.subheader("Анализ рынка")
+            if os.path.exists(analysis_path):
+                with open(analysis_path, "r", encoding="utf-8") as handle:
+                    st.markdown(handle.read())
+            else:
+                st.info("Файл анализа рынка не найден, показываю авто‑анализ.")
+                st.markdown(analysis_md)
 
         col1, col2 = st.columns(2)
         
@@ -1318,7 +1222,7 @@ def main() -> None:
         with col2:
             st.subheader("Сделки")
             try:
-                trades = service.get_trades(account_id, limit=trades_limit).get("trades", [])
+                trades = service.get_trades(account_id, limit=50).get("trades", [])
                 if trades:
                     st.dataframe(pd.DataFrame(trades))
                 else:
@@ -1328,22 +1232,6 @@ def main() -> None:
                 st.error(f"Ошибка загрузки сделок: {exc}")
 
         if "df" in locals() and not df.empty:
-            pos_match = next((p for p in positions if p.get("symbol") == symbol), None)
-            if pos_match and (stop_loss_pct > 0 or take_profit_pct > 0):
-                qty = float(pos_match.get("quantity", {}).get("value", 0) or 0)
-                base_price = float(pos_match.get("average_price", {}).get("value", 0) or df["close"].iloc[-1])
-                if qty != 0:
-                    if qty > 0:
-                        if stop_loss_pct > 0:
-                            fig.add_hline(y=base_price * (1 - stop_loss_pct / 100), line_dash="dot", line_color="red")
-                        if take_profit_pct > 0:
-                            fig.add_hline(y=base_price * (1 + take_profit_pct / 100), line_dash="dot", line_color="green")
-                    else:
-                        if stop_loss_pct > 0:
-                            fig.add_hline(y=base_price * (1 + stop_loss_pct / 100), line_dash="dot", line_color="red")
-                        if take_profit_pct > 0:
-                            fig.add_hline(y=base_price * (1 - take_profit_pct / 100), line_dash="dot", line_color="green")
-
             _add_trade_markers(fig, trades, symbol)
 
         st.subheader("Ордера")
