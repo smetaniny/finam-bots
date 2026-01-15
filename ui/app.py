@@ -62,6 +62,10 @@ def _apply_time_shift(df: pd.DataFrame, timeframe: str) -> pd.DataFrame:
     return result
 
 
+def _safe_symbol(symbol: str) -> str:
+    return symbol.replace("@", "_").replace("/", "_")
+
+
 def _append_synthetic_bar(df: pd.DataFrame, timeframe: str, last_quote_value: float | None) -> pd.DataFrame:
     if df.empty or last_quote_value is None:
         return df
@@ -1034,7 +1038,6 @@ def main() -> None:
     load_dotenv()
     st.set_page_config(page_title="Finam Bot Dashboard", layout="wide")
     log = get_logger("dashboard")
-    st.markdown("<meta http-equiv='refresh' content='60'>", unsafe_allow_html=True)
 
     account_id = os.getenv("FINAM_ACCOUNT_ID")
     if not account_id:
@@ -1094,7 +1097,7 @@ def main() -> None:
         ranges = {
             "TIME_FRAME_D": 60,
             "TIME_FRAME_H4": 60,
-            "TIME_FRAME_H1": 30,
+            "TIME_FRAME_H1": 60,
         }
         days_back = ranges[timeframe]
         st.caption(f"Глубина: {days_back} дней")
@@ -1273,10 +1276,20 @@ def main() -> None:
                     st.info("Нет данных")
                     continue
                 tf_df = _apply_time_shift(tf_df, tf)
-                tf_df = _append_synthetic_bar(tf_df, tf, last_quote_value)
+                if tf != "TIME_FRAME_D":
+                    tf_df = _append_synthetic_bar(tf_df, tf, last_quote_value)
                 ohlcv = tf_df[["timestamp", "open", "high", "low", "close"]].copy()
                 ohlcv = ohlcv.rename(columns={"open": "O", "high": "H", "low": "L", "close": "C"})
                 st.dataframe(ohlcv, use_container_width=True)
+                export_ts = pd.Timestamp.now(tz=MOSCOW_TZ).strftime("%Y-%m-%dT%H-%M")
+                export_name = f"{_safe_symbol(symbol)}_{tf}_{export_ts}_export.csv"
+                st.download_button(
+                    label="Скачать CSV",
+                    data=ohlcv.to_csv(index=False),
+                    file_name=export_name,
+                    mime="text/csv",
+                    key=f"download_{tf}",
+                )
 
         with tabs[2]:
             st.subheader("Авто‑анализ")
