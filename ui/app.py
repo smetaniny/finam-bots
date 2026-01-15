@@ -8,6 +8,7 @@ import pandas as pd
 import plotly.graph_objects as go
 import streamlit as st
 import yaml
+import re
 from dotenv import load_dotenv
 
 from adapters import FinamRestClient
@@ -679,6 +680,55 @@ def _plot_candles(
     return fig
 
 
+def _load_analysis_zones(analysis_path: str) -> List[Dict[str, Any]]:
+    """Парсит таблицу уровней из файла анализа рынка."""
+    if not os.path.exists(analysis_path):
+        return []
+    try:
+        with open(analysis_path, "r", encoding="utf-8") as handle:
+            content = handle.read()
+    except OSError:
+        return []
+
+    lines = content.splitlines()
+    in_table = False
+    zones: List[Dict[str, Any]] = []
+    for line in lines:
+        if line.strip().startswith("## 3. Сводная таблица уровней"):
+            in_table = True
+            continue
+        if in_table and not line.strip():
+            break
+        if not in_table:
+            continue
+        if not line.strip().startswith("|"):
+            continue
+        if "---" in line:
+            continue
+        parts = [p.strip() for p in line.strip().strip("|").split("|")]
+        if len(parts) < 2:
+            continue
+        level_raw = parts[0]
+        level_match = re.match(r"^([0-9.]+)\\s*-\\s*([0-9.]+)$", level_raw)
+        if level_match:
+            low = float(level_match.group(1))
+            high = float(level_match.group(2))
+        else:
+            try:
+                low = high = float(level_raw)
+            except ValueError:
+                continue
+        kind = parts[1].lower()
+        if "поддерж" in kind:
+            zone_type = "support"
+        elif "сопротив" in kind:
+            zone_type = "resistance"
+        else:
+            continue
+        zones.append({"type": zone_type, "zone_low": low, "zone_high": high})
+    return zones
+
+
 def _trend_summary(df: pd.DataFrame) -> Dict[str, Any]:
     if df.empty:
         return {
@@ -1128,6 +1178,7 @@ def main() -> None:
                 handle.write(analysis_md)
         except Exception:
             pass
+        analysis_zones = _load_analysis_zones(analysis_path)
 
         tabs = st.tabs(["График", "Свечи (O H L C)", "Анализ"])
         
@@ -1141,15 +1192,21 @@ def main() -> None:
                 df_plot_base = _apply_time_shift(df, timeframe)
                 
                 # Находим важные экстремумы и зоны (авто по 1.5 * AvgRange(20))
-                avg_range = float((df_plot_base["high"] - df_plot_base["low"]).tail(20).mean())
-                important_distance = max(0.0, 1.5 * avg_range)
-                zones, extreme_points = _important_extremes_with_zones(df_plot_base, important_distance)
+                if analysis_zones:
+                    zones = analysis_zones
+                    extreme_points = []
+                    chart_overlay = "Зоны из анализа рынка"
+                else:
+                    avg_range = float((df_plot_base["high"] - df_plot_base["low"]).tail(20).mean())
+                    important_distance = max(0.0, 1.5 * avg_range)
+                    zones, extreme_points = _important_extremes_with_zones(df_plot_base, important_distance)
+                    chart_overlay = overlay_text
 
-                if not zones:
-                    st.warning("Не найдено важных экстремумов. Возможные причины:")
-                    st.write("1. Параметр D слишком большой - уменьшите")
-                    st.write("2. На графике нет четких разворотов")
-                    st.write("3. Недостаточно данных для анализа")
+                    if not zones:
+                        st.warning("Не найдено важных экстремумов. Возможные причины:")
+                        st.write("1. Параметр D слишком большой - уменьшите")
+                        st.write("2. На графике нет четких разворотов")
+                        st.write("3. Недостаточно данных для анализа")
                 
                 df_plot = _append_synthetic_bar(df_plot_base, timeframe, last_quote_value)
                 
@@ -1159,8 +1216,8 @@ def main() -> None:
                     zones=zones,
                     extreme_points=extreme_points,
                     show_zones=True,
-                    show_extremes_markers=True,
-                    overlay_text=overlay_text,
+                    show_extremes_markers=not analysis_zones,
+                    overlay_text=chart_overlay,
                 )
                 
                 st.plotly_chart(fig, use_container_width=True)
