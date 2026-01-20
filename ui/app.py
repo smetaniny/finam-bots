@@ -23,6 +23,30 @@ TIMEFRAME_FIGURE_MULTIPLIER = {
     "TIME_FRAME_H4": 1.5,
     "TIME_FRAME_D": 2.0,
 }
+DEFAULT_CANDLES_RANGE_DAYS = 60
+CANDLES_RANGE_OPTIONS = {
+    "TIME_FRAME_D": [
+        ("2 месяца (как сейчас)", 60),
+        ("2 года", 730),
+        ("3 года", 1095),
+        ("5 лет (если доступно)", 1825),
+    ],
+    "TIME_FRAME_H4": [
+        ("2 месяца (как сейчас)", 60),
+        ("12 месяцев", 365),
+        ("24 месяца", 730),
+    ],
+    "TIME_FRAME_H1": [
+        ("2 месяца (как сейчас)", 60),
+        ("6 месяцев", 180),
+        ("12 месяцев", 365),
+    ],
+    "TIME_FRAME_M15": [
+        ("2 месяца (как сейчас)", 60),
+        ("1 месяц", 30),
+        ("2 недели", 14),
+    ],
+}
 
 # Константы для РТС
 RTS_MIN_DISTANCE_H1 = 50.0   # Минимум 50 пунктов для H1
@@ -99,6 +123,17 @@ def _append_synthetic_bar(df: pd.DataFrame, timeframe: str, last_quote_value: fl
         ignore_index=True,
     )
     return combined.drop_duplicates(subset=["timestamp"], keep="last")
+
+
+def _append_adjusted_columns(df: pd.DataFrame) -> pd.DataFrame:
+    if df.empty:
+        return df
+    result = df.copy()
+    result["adj_open"] = result["open"]
+    result["adj_high"] = result["high"]
+    result["adj_low"] = result["low"]
+    result["adj_close"] = result["close"]
+    return result
 
 
 def _price_step_from_asset(asset: dict) -> float | None:
@@ -596,6 +631,7 @@ def _plot_candles(
     extreme_points: List[Dict[str, Any]] = None,
     show_zones: bool = True,
     show_extremes_markers: bool = True,
+    show_patterns: bool = False,
     overlay_text: str | None = None,
 ) -> go.Figure:
     """Создает свечной график с зонами поддержки/сопротивления."""
@@ -616,7 +652,8 @@ def _plot_candles(
         ]
     )
     
-    _add_pattern_labels(fig, df)
+    if show_patterns:
+        _add_pattern_labels(fig, df)
     
     # Добавляем зоны поддержки/сопротивления
     if show_zones and zones:
@@ -1101,11 +1138,17 @@ def main() -> None:
 
     with st.sidebar:
         st.header("Параметры")
+        futures_symbols = ["RMH6@RTSX"]
+        stock_symbols = ["SBER@MISX"]
+        symbol_group = st.radio(
+            "Тип инструмента",
+            ["Фьючерсы", "Акции"],
+            index=0,
+            horizontal=True,
+        )
         symbol = st.selectbox(
             "Инструмент (ticker@mic)",
-            [
-                "RMH6@RTSX",
-            ],
+            futures_symbols if symbol_group == "Фьючерсы" else stock_symbols,
             index=0,
         )
         timeframe = st.selectbox(
@@ -1215,27 +1258,69 @@ def main() -> None:
                     f"{symbol} {timeframe} - Важные экстремумы",
                     zones=zones,
                     extreme_points=extreme_points,
-                    show_zones=True,
-                    show_extremes_markers=not analysis_zones,
-                    overlay_text=chart_overlay,
+                    show_zones=False,
+                    show_extremes_markers=False,
+                    show_patterns=False,
+                    overlay_text=None,
                 )
                 
                 st.plotly_chart(fig, use_container_width=True)
 
         with tabs[1]:
             st.subheader("Свечи (O H L C)")
-            for tf in ("TIME_FRAME_D", "TIME_FRAME_H4", "TIME_FRAME_H1"):
-                tf_bars = service.get_bars(symbol, tf, ranges[tf])
+            with st.expander("Период для таблиц", expanded=False):
+                candle_ranges: Dict[str, int] = {}
+                for tf in ("TIME_FRAME_D", "TIME_FRAME_H4", "TIME_FRAME_H1", "TIME_FRAME_M15"):
+                    options = CANDLES_RANGE_OPTIONS[tf]
+                    labels = [label for label, _ in options]
+                    selected_label = st.selectbox(
+                        f"{tf}",
+                        labels,
+                        index=0,
+                        key=f"candles_range_{tf}",
+                    )
+                    candle_ranges[tf] = dict(options).get(selected_label, DEFAULT_CANDLES_RANGE_DAYS)
+            st.caption(
+                "Adjusted цены совпадают с исходными (данные по дивидендам/сплитам не подключены)."
+            )
+            for tf in ("TIME_FRAME_D", "TIME_FRAME_H4", "TIME_FRAME_H1", "TIME_FRAME_M15"):
+                tf_bars = service.get_bars(symbol, tf, candle_ranges[tf])
                 tf_df = _bars_to_df(tf_bars)
-                st.markdown(f"**{tf} (последние {ranges[tf]} дней)**")
+                st.markdown(f"**{tf} (последние {candle_ranges[tf]} дней)**")
                 if tf_df.empty:
                     st.info("Нет данных")
                     continue
                 tf_df = _apply_time_shift(tf_df, tf)
                 if tf != "TIME_FRAME_D":
                     tf_df = _append_synthetic_bar(tf_df, tf, last_quote_value)
-                ohlcv = tf_df[["timestamp", "open", "high", "low", "close"]].copy()
-                ohlcv = ohlcv.rename(columns={"open": "O", "high": "H", "low": "L", "close": "C"})
+                tf_df = _append_adjusted_columns(tf_df)
+                ohlcv = tf_df[
+                    [
+                        "timestamp",
+                        "open",
+                        "high",
+                        "low",
+                        "close",
+                        "volume",
+                        "adj_open",
+                        "adj_high",
+                        "adj_low",
+                        "adj_close",
+                    ]
+                ].copy()
+                ohlcv = ohlcv.rename(
+                    columns={
+                        "open": "O",
+                        "high": "H",
+                        "low": "L",
+                        "close": "C",
+                        "volume": "V",
+                        "adj_open": "Adj O",
+                        "adj_high": "Adj H",
+                        "adj_low": "Adj L",
+                        "adj_close": "Adj C",
+                    }
+                )
                 st.dataframe(ohlcv, use_container_width=True)
                 export_ts = pd.Timestamp.now(tz=MOSCOW_TZ).strftime("%Y-%m-%dT%H-%M")
                 export_name = f"{_safe_symbol(symbol)}_{tf}_{export_ts}_export.csv"

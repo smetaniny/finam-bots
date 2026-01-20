@@ -32,7 +32,7 @@ class FinamDataService:
 
     def _max_days_for_timeframe(self, timeframe: str) -> int:
         # Finam API rejects too wide intervals for intraday timeframes.
-        if timeframe in {"TIME_FRAME_H1", "TIME_FRAME_H4"}:
+        if timeframe in {"TIME_FRAME_H1", "TIME_FRAME_H4", "TIME_FRAME_M15"}:
             return 30
         return 365
 
